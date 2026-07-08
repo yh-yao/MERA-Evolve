@@ -134,3 +134,4 @@ test execution.
 - Keep training temperature above zero for GRPO (`TEMPERATURE=0.7` to `1.0` is a
   normal starting range), otherwise grouped rollouts can collapse to identical
   samples.
+# MERA-Evolve
