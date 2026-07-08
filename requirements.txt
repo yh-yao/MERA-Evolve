@@ -1,0 +1,8 @@
+openai>=1.0
+pandas>=2.0
+pyarrow>=14.0
+pytest>=8.0
+
+# Install verl separately in the training environment, matching your CUDA stack:
+#   pip install -e /path/to/verl
+# or follow https://verl.readthedocs.io/ installation docs.
