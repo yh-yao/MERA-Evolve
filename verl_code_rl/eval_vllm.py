@@ -12,10 +12,20 @@ from openai import OpenAI
 
 from verl_code_rl.code_eval import extract_code, run_code_tests
 from verl_code_rl.prepare_data import SYSTEM, _dataset_name, load_jsonl
+from verl_code_rl.skills import SkillBook
 
 
-def _call_one(client: OpenAI, model: str, task: dict, temperature: float, max_tokens: int) -> dict:
+def _call_one(
+    client: OpenAI,
+    model: str,
+    task: dict,
+    temperature: float,
+    max_tokens: int,
+    skillbook: SkillBook | None,
+) -> dict:
     started = time.time()
+    procedure = skillbook.get_procedure(task["prompt"]) if skillbook else ""
+    problem = f"{procedure}\n\n---\n\n{task['prompt']}" if procedure else task["prompt"]
     messages = [
         {"role": "system", "content": SYSTEM},
         {
@@ -23,7 +33,7 @@ def _call_one(client: OpenAI, model: str, task: dict, temperature: float, max_to
             "content": (
                 "Complete the following Python function. Return only the complete code "
                 "needed to solve the task.\n\n"
-                f"{task['prompt']}"
+                f"{problem}"
             ),
         },
     ]
@@ -45,6 +55,7 @@ def _call_one(client: OpenAI, model: str, task: dict, temperature: float, max_to
             "latency": time.time() - started,
             "completion": text,
             "code": code,
+            "has_procedure": bool(procedure),
         }
     except Exception as exc:  # noqa: BLE001
         return {
@@ -55,6 +66,7 @@ def _call_one(client: OpenAI, model: str, task: dict, temperature: float, max_to
             "latency": time.time() - started,
             "completion": "",
             "code": "",
+            "has_procedure": bool(procedure),
         }
 
 
@@ -84,11 +96,16 @@ def main() -> int:
     parser.add_argument("--workers", type=int, default=16)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--max-tokens", type=int, default=768)
+    parser.add_argument("--skillbook", type=Path, default=None)
     parser.add_argument("--out", type=Path, default=Path("results/eval.jsonl"))
     args = parser.parse_args()
 
     tasks = _filter_tasks(load_jsonl(args.data), args.split, args.dataset, args.limit)
     client = OpenAI(api_key=args.api_key, base_url=args.base_url)
+    skillbook = None
+    if args.skillbook:
+        skillbook = SkillBook()
+        skillbook.load(args.skillbook)
     args.out.parent.mkdir(parents=True, exist_ok=True)
 
     passed = 0
@@ -96,7 +113,7 @@ def main() -> int:
     with args.out.open("w") as out:
         with ThreadPoolExecutor(max_workers=args.workers) as pool:
             futures = [
-                pool.submit(_call_one, client, args.model, task, args.temperature, args.max_tokens)
+                pool.submit(_call_one, client, args.model, task, args.temperature, args.max_tokens, skillbook)
                 for task in tasks
             ]
             for fut in as_completed(futures):

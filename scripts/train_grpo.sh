@@ -30,6 +30,7 @@ TOTAL_EPOCHS="${TOTAL_EPOCHS:-1}"
 SAVE_FREQ="${SAVE_FREQ:-20}"
 TEST_FREQ="${TEST_FREQ:-10}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.5}"
+OUTPUT_DIR="${OUTPUT_DIR:-}"
 
 if [[ ! -f "$TRAIN_FILE" || ! -f "$VAL_FILE" ]]; then
   echo "[train_grpo] missing parquet files. Run scripts/prepare_data.sh first." >&2
@@ -79,4 +80,5 @@ set -x
   trainer.test_freq="$TEST_FREQ" \
   trainer.total_epochs="$TOTAL_EPOCHS" \
   'trainer.logger=["console"]' \
+  ${OUTPUT_DIR:+trainer.default_local_dir="$OUTPUT_DIR"} \
   "$@"
