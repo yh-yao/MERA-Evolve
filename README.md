@@ -7,10 +7,10 @@ the training core on `verl`, while adding the useful outer loop from
 - `verl` for RL training
 - vLLM for rollout inside verl and for standalone evaluation serving
 - rule reward from Python test execution
-- trace collection over small/large model outcomes
-- a single global procedural SkillBook
-- a learned prompt router
-- offline ablation metrics across large / skills / router / full
+- oracle trace collection separated from the deployed routing policy
+- a compact global SkillBook (router owns per-prompt routing)
+- a cost-calibrated learned prompt router
+- held-out policy ablation across large / skills / router / full
 
 ## Layout
 
@@ -23,10 +23,14 @@ verl_code_rl/prepare_data.py
 verl_code_rl/eval_vllm.py
 verl_code_rl/collect_traces.py
 verl_code_rl/build_skillbook.py
+verl_code_rl/traces_to_sft.py  teacher + self-repair SFT pair extraction
 verl_code_rl/train_router.py
 verl_code_rl/run_ablation.py
+verl_code_rl/trace_diagnostics.py
 scripts/prepare_data.sh
 scripts/train_grpo.sh
+scripts/train_sft.sh           explicit version-pinned SFT launcher hook
+scripts/reload_small_vllm.sh   local checkpoint reload helper
 scripts/serve_vllm.sh
 scripts/eval_vllm.sh
 scripts/run_full_pipeline.sh
@@ -92,10 +96,15 @@ Outputs:
 ```text
 results/smoke_evolve/cycle_0/
   traces.jsonl
+  trace_diagnostics.json
   skillbook.json
+  sft_pairs.jsonl
   processed/train.parquet
   processed/val.parquet
+  router_train_traces.jsonl
+  router_calibration_traces.jsonl
   router/router.joblib
+  eval_traces.jsonl
   e2e_ablation_summary.json
 ```
 
@@ -119,13 +128,70 @@ bash scripts/run_full_pipeline.sh \
   --large-model Qwen/Qwen2.5-Coder-3B-Instruct
 ```
 
-Use `--skip-train` when you only want traces, skills, router, and ablation. By
-default, non-mock runs call `scripts/train_grpo.sh` with cycle-local parquet
-files and write verl checkpoints under `cycle_N/verl_checkpoints`.
+Use `--skip-train` when you only want traces, skills, router, and held-out
+ablation. By default, non-mock runs call `scripts/train_grpo.sh` with cycle-local
+parquet files and write verl checkpoints under `cycle_N/verl_checkpoints`.
 
-For multi-cycle real training, restart the small-model vLLM server on port 8000
-with the checkpoint printed at the end of the previous cycle before collecting
-the next cycle's traces. The mock path and `--skip-train` path do not need this.
+### What a cycle measures
+
+Each cycle keeps two kinds of data separate:
+
+```text
+oracle train traces → SkillBook → optional SFT pairs → verl GRPO
+                                         ↓
+current checkpoint → router-train shard + router-calibration shard → calibrated router
+                                         ↓
+fixed eval split → oracle outcomes + deployed cascade simulation → ablation
+```
+
+`traces.jsonl` always records small and large oracle outcomes unless
+`--probe-only` is set. `policy_*` records the deployment outcome: router-large
+goes straight to the large model, while router-small uses small and falls back
+to large only after a failed execution. The ablation includes this fallback cost
+instead of treating a router-small decision as free.
+
+The Router learns a failure probability from `SMALL_SAMPLES` independent small
+rollouts. Its threshold is selected on a distinct deterministic task-id shard,
+not on its training traces. Set actual model rates to make cost units USD:
+
+```bash
+SMALL_INPUT_COST_PER_MILLION=0.30 SMALL_OUTPUT_COST_PER_MILLION=1.20 \
+LARGE_INPUT_COST_PER_MILLION=3.00 LARGE_OUTPUT_COST_PER_MILLION=12.00 \
+SMALL_SAMPLES=4 ROUTER_TARGET_PASS_RATE=0.95 \
+bash scripts/run_full_pipeline.sh --limit 64
+```
+
+### Checkpoint reload is required for real closed loops
+
+vLLM does not load a new checkpoint merely because the OpenAI request supplies
+a new model name. After GRPO, the pipeline therefore requires
+`SMALL_RELOAD_CMD` before it will perform post-training calibration/evaluation
+or begin the next cycle. For a local server managed by this repository:
+
+```bash
+SMALL_RELOAD_CMD='scripts/reload_small_vllm.sh' \
+GPU=0 bash scripts/run_full_pipeline.sh --n-cycles 2 --limit 64
+```
+
+The helper understands a Hugging Face model or a standard LoRA adapter. If a
+given `verl` checkpoint is not directly vLLM-loadable, export/merge it in your
+cluster-specific reload command; the pipeline deliberately refuses to silently
+score the old server.
+
+### Optional SFT warm start
+
+`traces_to_sft.py` extracts teacher pairs (`small fail ∧ large pass`) and
+self-repair pairs. `verl` remains the GRPO trainer. SFT launchers differ by the
+installed verl/FSDP version, so it is explicitly supplied rather than guessed:
+
+```bash
+ENABLE_SFT=1 \
+SFT_TRAIN_CMD='your-version-pinned-sft-launcher --data "$SFT_DATA" --output "$SFT_OUTPUT_DIR" --model "$MODEL_PATH"' \
+bash scripts/run_full_pipeline.sh --limit 64
+```
+
+Without `ENABLE_SFT=1`, the SFT artifact is still produced for inspection and
+GRPO starts from the current small model.
 
 ## Standalone vLLM Eval
 
@@ -207,3 +273,7 @@ test execution.
 - Keep training temperature above zero for GRPO (`TEMPERATURE=0.7` to `1.0` is a
   normal starting range), otherwise grouped rollouts can collapse to identical
   samples.
+- `REWARD_COMPILE_BONUS` is disabled by default, preserving binary execution
+  reward. If enabled, keep it at or below `0.1`; `trace_diagnostics.json` should
+  guide whether all-pass/all-fail GRPO groups need more sampling or a harder
+  task mix.

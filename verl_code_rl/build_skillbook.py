@@ -7,7 +7,7 @@ import json
 import sys
 from pathlib import Path
 
-from verl_code_rl.skills import SkillBook
+from verl_code_rl.skills import SkillBook, make_llm_distiller
 
 
 def main() -> int:
@@ -17,6 +17,11 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--small-model", default="small")
     parser.add_argument("--large-model", default="large")
+    parser.add_argument("--distiller-model", default="",
+                        help="Optional OpenAI-compatible model for compact Skill distillation.")
+    parser.add_argument("--distiller-base-url", default="http://127.0.0.1:8001/v1")
+    parser.add_argument("--api-key", default="EMPTY")
+    parser.add_argument("--distiller-max-examples", type=int, default=40)
     args = parser.parse_args()
 
     skillbook = SkillBook()
@@ -33,7 +38,13 @@ def main() -> int:
             skillbook.update_from_trace(trace, small_model=args.small_model, large_model=args.large_model)
             count += 1
 
-    distilled = skillbook.distill_all()
+    distiller = None
+    if args.distiller_model:
+        distiller = make_llm_distiller(
+            args.distiller_model, args.distiller_base_url, args.api_key,
+            max_examples=args.distiller_max_examples,
+        )
+    distilled = skillbook.distill_all(distiller=distiller)
     skillbook.save(args.output)
     print(
         f"[skillbook] read={count} skills={skillbook.summary()['total_skills']} "

@@ -27,7 +27,10 @@ _SKIP_CALLS = {"if", "for", "while", "print", "return", "range", "len"}
 
 def _select_examples(exemplars: list[dict[str, Any]], k: int | None = None) -> list[dict[str, str]]:
     if k is None:
-        k = int(os.environ.get("SKILL_FEWSHOT_K", "2"))
+        # A global skill must not inject arbitrary solved programs into every
+        # task.  Keep examples persisted for inspection/retrieval, but opt out
+        # of prompt injection unless an experiment explicitly enables it.
+        k = int(os.environ.get("SKILL_FEWSHOT_K", "0"))
     if k <= 0:
         return []
     pool = [ex for ex in exemplars if ex.get("prompt") and ex.get("completion")]
@@ -55,7 +58,7 @@ def _render_examples(examples: list[dict[str, str]]) -> str:
     return "\n\n".join(parts)
 
 
-def _heuristic_procedure(signature: str, exemplars: list[dict[str, Any]], max_chars: int = 1400) -> str:
+def _heuristic_procedure(signature: str, exemplars: list[dict[str, Any]], max_chars: int = 800) -> str:
     snippets: list[str] = []
     calls: list[str] = []
     for ex in exemplars:
@@ -76,13 +79,57 @@ def _heuristic_procedure(signature: str, exemplars: list[dict[str, Any]], max_ch
     ]
     if calls:
         lines.extend(["", "Recurring helper/function patterns: " + ", ".join(calls[:12])])
-    if snippets:
+    if snippets and os.environ.get("SKILL_HEURISTIC_INCLUDE_SNIPPET", "0") == "1":
         lines.extend(["", "Reusable solution shape:", "```python", snippets[0][:650], "```"])
-    else:
+    elif os.environ.get("SKILL_HEURISTIC_INCLUDE_SNIPPET", "0") == "1":
         sample = str(exemplars[0].get("completion") or "").strip() if exemplars else ""
         if sample:
             lines.extend(["", "Reference solution shape:", sample[:650]])
     return "\n".join(lines)[:max_chars]
+
+
+def make_llm_distiller(model: str, base_url: str, api_key: str, max_examples: int = 40):
+    """Return a bounded, incremental cheatsheet distiller.
+
+    It is deliberately optional: the heuristic is deterministic and keeps smoke
+    runs offline, while real runs can use a capable teacher to turn successful
+    traces into a short, reusable skill instead of copying raw programs.
+    """
+    from openai import OpenAI
+
+    client = OpenAI(api_key=api_key, base_url=base_url)
+
+    def distill(signature: str, exemplars: list[dict[str, Any]], previous: str = "") -> str:
+        examples = exemplars[-max(1, max_examples):]
+        rendered = "\n\n".join(
+            "Problem:\n```python\n" + str(item.get("prompt", ""))[:400]
+            + "\n```\nSolution:\n```python\n" + str(item.get("completion", ""))[:500] + "\n```"
+            for item in examples
+        )
+        prompt = (
+            "Write a compact coding cheatsheet for a small code model. Return at most "
+            "180 words: 2-4 transferable recipes with trigger conditions and at most "
+            "3 concrete gotchas. Do not include a full solution, task-specific names, "
+            "or generic advice.\n\n"
+            f"Skill: {signature}\n"
+            + (f"Previous cheatsheet (improve it):\n{previous[:1200]}\n\n" if previous else "")
+            + f"Successful traces:\n{rendered}"
+        )
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.2,
+                max_tokens=600,
+            )
+            text = (response.choices[0].message.content or "").strip()
+            if text:
+                return text[:1400]
+        except Exception:  # noqa: BLE001 - deterministic fallback keeps cycles alive
+            pass
+        return _heuristic_procedure(signature, exemplars)
+
+    return distill
 
 
 class Skill:
@@ -117,11 +164,15 @@ class Skill:
             if len(self.exemplars) > self.max_exemplars:
                 self.exemplars = self.exemplars[-self.max_exemplars:]
 
-    def distill(self) -> str:
+    def distill(self, distiller=None) -> str:
         if not self.exemplars:
             return self.procedure
-        self.procedure = _heuristic_procedure(self.signature, self.exemplars)
-        self.procedure_source = "heuristic"
+        if distiller is None:
+            self.procedure = _heuristic_procedure(self.signature, self.exemplars)
+            self.procedure_source = "heuristic"
+        else:
+            self.procedure = str(distiller(self.signature, self.exemplars, self.procedure))[:1400]
+            self.procedure_source = "llm"
         self.examples = _select_examples(self.exemplars)
         return self.procedure
 
@@ -187,15 +238,15 @@ class SkillBook:
         skill = self.skills.get(extract_signature(prompt))
         if not skill:
             return ""
-        examples = _render_examples(skill.examples)
+        examples = _render_examples(skill.examples) if os.environ.get("SKILL_INCLUDE_EXAMPLES", "0") == "1" else ""
         if skill.procedure and examples:
             return f"{skill.procedure}\n\n{examples}"
         return skill.procedure or examples
 
-    def distill_all(self) -> int:
+    def distill_all(self, distiller=None) -> int:
         count = 0
         for skill in self.skills.values():
-            if skill.distill():
+            if skill.distill(distiller=distiller):
                 count += 1
         return count
 

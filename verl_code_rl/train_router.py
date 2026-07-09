@@ -30,11 +30,44 @@ def load_examples(path: Path) -> tuple[list[str], list[int], int]:
     return prompts, labels, skipped
 
 
-def train(prompts: list[str], labels: list[int], seed: int = 42):
+def load_binomial_examples(path: Path) -> tuple[list[str], list[int], list[str], int]:
+    """Expand K small rollouts and retain task ids for leakage-free grouped CV."""
+    prompts: list[str] = []
+    labels: list[int] = []
+    groups: list[str] = []
+    skipped = 0
+    with path.open() as fh:
+        for line_no, line in enumerate(fh):
+            try:
+                row: dict[str, Any] = json.loads(line)
+            except json.JSONDecodeError:
+                skipped += 1
+                continue
+            prompt = str(row.get("prompt") or "")
+            if not prompt:
+                skipped += 1
+                continue
+            n = int(row.get("small_samples", 1) or 1)
+            passed = row.get("small_pass_count")
+            if not isinstance(passed, int):
+                success = row.get("small_success")
+                if not isinstance(success, bool):
+                    skipped += 1
+                    continue
+                passed = int(success)
+            passed = max(0, min(passed, n))
+            task_id = str(row.get("task_id") or f"line-{line_no}")
+            prompts.extend([prompt] * n)
+            labels.extend([0] * passed + [1] * (n - passed))
+            groups.extend([task_id] * n)
+    return prompts, labels, groups, skipped
+
+
+def train(prompts: list[str], labels: list[int], seed: int = 42, groups: list[str] | None = None):
     from sklearn.feature_extraction.text import TfidfVectorizer
     from sklearn.linear_model import LogisticRegression
-    from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
-    from sklearn.model_selection import StratifiedKFold, cross_val_predict
+    from sklearn.metrics import accuracy_score, brier_score_loss, f1_score, roc_auc_score
+    from sklearn.model_selection import GroupKFold, StratifiedKFold, cross_val_predict
     from sklearn.pipeline import Pipeline
 
     if len(prompts) < 2:
@@ -43,6 +76,8 @@ def train(prompts: list[str], labels: list[int], seed: int = 42):
         print(f"[router] WARN only one class {set(labels)}; adding synthetic complement", file=sys.stderr)
         prompts = prompts + ["__synthetic_complementary_router_class__"]
         labels = labels + [1 - labels[0]]
+        if groups is not None:
+            groups = groups + ["__synthetic_complementary_router_class__"]
 
     pipe = Pipeline([
         ("tfidf", TfidfVectorizer(max_features=4096, ngram_range=(1, 2))),
@@ -51,19 +86,34 @@ def train(prompts: list[str], labels: list[int], seed: int = 42):
 
     metrics: dict[str, float | int] = {}
     min_class = min(labels.count(0), labels.count(1))
-    if len(labels) >= 6 and min_class >= 2:
-        splits = min(5, min_class)
-        cv = StratifiedKFold(n_splits=splits, shuffle=True, random_state=seed)
-        probs = cross_val_predict(pipe, prompts, labels, cv=cv, method="predict_proba")[:, 1]
-        preds = [1 if p >= 0.5 else 0 for p in probs]
-        metrics = {
-            "auc": float(roc_auc_score(labels, probs)),
-            "acc": float(accuracy_score(labels, preds)),
-            "f1_large": float(f1_score(labels, preds, pos_label=1, zero_division=0)),
-            "cv_splits": splits,
-        }
+    n_groups = len(set(groups)) if groups is not None else len(labels)
+    if len(labels) >= 6 and min_class >= 2 and n_groups >= 2:
+        splits = min(5, min_class, n_groups)
+        cv = GroupKFold(n_splits=splits) if groups is not None else StratifiedKFold(
+            n_splits=splits, shuffle=True, random_state=seed,
+        )
+        try:
+            probs = cross_val_predict(pipe, prompts, labels, cv=cv, groups=groups, method="predict_proba")[:, 1]
+            preds = [1 if p >= 0.5 else 0 for p in probs]
+            metrics = {
+                "auc": float(roc_auc_score(labels, probs)),
+                "acc": float(accuracy_score(labels, preds)),
+                "f1_large": float(f1_score(labels, preds, pos_label=1, zero_division=0)),
+                "brier": float(brier_score_loss(labels, probs)),
+                "cv_splits": splits,
+                "cv_grouped_by_task": groups is not None,
+            }
+        except ValueError as exc:
+            print(f"[router] WARN grouped CV unavailable for this label layout: {exc}", file=sys.stderr)
+            metrics = {
+                "auc": 0.0, "acc": 0.0, "f1_large": 0.0, "brier": 0.0,
+                "cv_splits": 0, "cv_grouped_by_task": groups is not None,
+            }
     else:
-        metrics = {"auc": 0.0, "acc": 0.0, "f1_large": 0.0, "cv_splits": 0}
+        metrics = {
+            "auc": 0.0, "acc": 0.0, "f1_large": 0.0, "brier": 0.0,
+            "cv_splits": 0, "cv_grouped_by_task": groups is not None,
+        }
 
     pipe.fit(prompts, labels)
     meta = {
@@ -80,20 +130,80 @@ def train(prompts: list[str], labels: list[int], seed: int = 42):
     return pipe, meta
 
 
+def select_threshold(
+    router,
+    calibration_path: Path,
+    target_pass_rate: float | None,
+    fallback_small_cost: float,
+    fallback_large_cost: float,
+) -> tuple[float, dict[str, Any]]:
+    """Select a cost-minimal cascade threshold on disjoint calibration traces."""
+    rows: list[dict[str, Any]] = []
+    with calibration_path.open() as fh:
+        for line in fh:
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(row.get("small_success"), bool) and isinstance(row.get("large_success"), bool):
+                rows.append(row)
+    if not rows:
+        raise ValueError("calibration traces must contain small_success and large_success")
+    probabilities = router.predict_proba([str(row.get("prompt") or "") for row in rows])[:, 1]
+    curve: list[dict[str, float]] = []
+    for i in range(1, 100):
+        threshold = i / 100
+        passed = total_cost = 0.0
+        fallback_count = 0
+        for row, probability in zip(rows, probabilities):
+            small_cost = float(row.get("small_cost") or fallback_small_cost)
+            large_cost = float(row.get("large_cost") or fallback_large_cost)
+            if probability >= threshold:
+                passed += int(bool(row["large_success"]))
+                total_cost += large_cost
+            elif row["small_success"]:
+                passed += 1
+                total_cost += small_cost
+            else:
+                passed += int(bool(row["large_success"]))
+                total_cost += small_cost + large_cost
+                fallback_count += 1
+        curve.append({"threshold": threshold, "task_pass": passed / len(rows),
+                      "avg_cost": total_cost / len(rows), "fallback_rate": fallback_count / len(rows)})
+    feasible = [x for x in curve if target_pass_rate is None or x["task_pass"] >= target_pass_rate]
+    chosen = min(feasible, key=lambda x: (x["avg_cost"], -x["task_pass"])) if feasible else max(
+        curve, key=lambda x: (x["task_pass"], -x["avg_cost"]),
+    )
+    return float(chosen["threshold"]), {"chosen": chosen, "curve": curve}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--traces", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--calibration-traces", type=Path, default=None,
+                        help="Disjoint traces used only for policy-threshold selection.")
+    parser.add_argument("--target-pass-rate", type=float, default=None)
+    parser.add_argument("--fallback-small-cost", type=float, default=0.001)
+    parser.add_argument("--fallback-large-cost", type=float, default=0.01)
     args = parser.parse_args()
 
-    prompts, labels, skipped = load_examples(args.traces)
+    prompts, labels, groups, skipped = load_binomial_examples(args.traces)
     print(
         f"[router] loaded {len(prompts)} examples "
         f"({sum(labels)} need-large, {len(labels) - sum(labels)} small-ok); skipped={skipped}",
         file=sys.stderr,
     )
-    pipe, meta = train(prompts, labels, seed=args.seed)
+    pipe, meta = train(prompts, labels, seed=args.seed, groups=groups)
+
+    if args.calibration_traces:
+        threshold, calibration = select_threshold(
+            pipe, args.calibration_traces, args.target_pass_rate,
+            args.fallback_small_cost, args.fallback_large_cost,
+        )
+        meta["threshold_default"] = threshold
+        meta["threshold_selection"] = calibration
 
     import joblib
 

@@ -7,6 +7,7 @@ verl reward function. Keep dependencies stdlib-only.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from typing import Any
@@ -109,8 +110,22 @@ check({entry_point})
 
 
 def score_solution(solution_str: str, ground_truth: Any, extra_info: dict[str, Any] | None = None) -> float:
-    """Return 1.0 when the generated code passes all tests, otherwise 0.0."""
+    """Return pass reward, with an opt-in syntax-validity shaping floor.
+
+    The default remains strictly binary for reproducibility.  A tiny compile
+    bonus can reduce all-zero GRPO groups, but is opt-in because passing the
+    executable tests must remain the dominant objective.
+    """
     task = load_ground_truth(ground_truth, extra_info=extra_info)
     code = extract_code(solution_str, task.get("entry_point", ""), task.get("prompt", ""))
     ok, _ = run_code_tests(task, code, timeout=int(task.get("timeout", 10)))
-    return 1.0 if ok else 0.0
+    if ok:
+        return 1.0
+    compile_bonus = float(os.environ.get("REWARD_COMPILE_BONUS", "0"))
+    if compile_bonus <= 0:
+        return 0.0
+    try:
+        compile(code, "<generated>", "exec")
+    except (SyntaxError, ValueError, TypeError):
+        return 0.0
+    return min(compile_bonus, 0.1)

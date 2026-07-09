@@ -42,30 +42,66 @@ def score(labels: list[int], preds: list[int]) -> dict[str, float | int]:
     recall = tp / (tp + fn) if tp + fn else 0.0
     large_f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
     n = len(labels)
-    small_cost = 0.001
-    large_cost = 0.01
-    predicted_large = sum(preds)
-    cost = predicted_large * large_cost + (n - predicted_large) * small_cost
     return {
         "routing_acc": sum(int(a == b) for a, b in zip(labels, preds)) / n,
         "large_f1": large_f1,
         "fallback": sum(1 for label, pred in zip(labels, preds) if label == 1 and pred == 0) / n,
-        "cost_vs_large": cost / (n * large_cost),
+        # Kept for JSON compatibility. Real cascade cost is filled by
+        # policy_metrics() from measured trace usage.
+        "cost_vs_large": 0.0,
         "n_eval": n,
     }
 
 
-def task_pass_rate(traces: list[dict[str, Any]], preds: list[int]) -> float:
+def policy_metrics(
+    traces: list[dict[str, Any]],
+    preds: list[int],
+    fallback_small_cost: float = 0.001,
+    fallback_large_cost: float = 0.01,
+) -> dict[str, float | int]:
+    """Evaluate the actual deployment policy, including small→large fallback."""
     if not traces:
-        return 0.0
-    ok = 0
+        return {"task_pass": 0.0, "avg_cost": 0.0, "cost_vs_large": 0.0,
+                "fallback_rate": 0.0, "direct_large_rate": 0.0, "unknown_rate": 0.0}
+    passed = 0
+    total_cost = 0.0
+    always_large_cost = 0.0
+    fallbacks = direct_large = unknown = 0
     for row, pred in zip(traces, preds):
-        if pred == 0:
-            passed = bool(row.get("small_success"))
+        small_cost = float(row.get("small_cost") or fallback_small_cost)
+        large_cost = float(row.get("large_cost") or fallback_large_cost)
+        always_large_cost += large_cost
+        large_known = not row.get("large_skipped", False)
+        if pred == 1:
+            direct_large += 1
+            if not large_known:
+                unknown += 1
+                continue
+            passed += int(bool(row.get("large_success")))
+            total_cost += large_cost
+        elif row.get("small_success"):
+            passed += 1
+            total_cost += small_cost
+        elif not large_known:
+            unknown += 1
         else:
-            passed = bool(row.get("large_success")) if not row.get("large_skipped", False) else bool(row.get("final_success"))
-        ok += int(passed)
-    return ok / len(traces)
+            fallbacks += 1
+            passed += int(bool(row.get("large_success")))
+            total_cost += small_cost + large_cost
+    known = len(traces) - unknown
+    return {
+        "task_pass": passed / known if known else 0.0,
+        "avg_cost": total_cost / known if known else 0.0,
+        "cost_vs_large": total_cost / always_large_cost if always_large_cost else 0.0,
+        "fallback_rate": fallbacks / len(traces),
+        "direct_large_rate": direct_large / len(traces),
+        "unknown_rate": unknown / len(traces),
+    }
+
+
+def task_pass_rate(traces: list[dict[str, Any]], preds: list[int]) -> float:
+    """Backward-compatible wrapper for callers/tests."""
+    return float(policy_metrics(traces, preds)["task_pass"])
 
 
 def router_predictions(traces: list[dict[str, Any]], router_dir: Path, threshold: float) -> list[int]:
@@ -88,6 +124,8 @@ def main() -> int:
     parser.add_argument("--router-threshold", type=float, default=0.5)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--markdown-output", type=Path, default=None)
+    parser.add_argument("--fallback-small-cost", type=float, default=0.001)
+    parser.add_argument("--fallback-large-cost", type=float, default=0.01)
     args = parser.parse_args()
 
     traces, labels = labels_for(load_traces(args.traces))
@@ -105,7 +143,9 @@ def main() -> int:
     variants = {}
     for name, pred in preds.items():
         variants[name] = score(labels, pred)
-        variants[name]["task_pass"] = task_pass_rate(traces, pred)
+        variants[name].update(policy_metrics(
+            traces, pred, args.fallback_small_cost, args.fallback_large_cost,
+        ))
 
     out = {
         "variants": variants,
@@ -118,14 +158,15 @@ def main() -> int:
 
     if args.markdown_output:
         lines = [
-            "| Variant | Routing Acc | Large F1 | Fallback | Cost vs Large | Task Pass |",
-            "|---|---:|---:|---:|---:|---:|",
+            "| Variant | Routing Acc | Large F1 | Policy Fallback | Direct Large | Cost vs Large | Task Pass |",
+            "|---|---:|---:|---:|---:|---:|---:|",
         ]
         for name in ("large", "skills", "router", "full"):
             item = variants[name]
             lines.append(
                 f"| {name} | {item['routing_acc']:.2%} | {item['large_f1']:.2%} | "
-                f"{item['fallback']:.2%} | {item['cost_vs_large']:.2%} | {item['task_pass']:.2%} |"
+                f"{item['fallback_rate']:.2%} | {item['direct_large_rate']:.2%} | "
+                f"{item['cost_vs_large']:.2%} | {item['task_pass']:.2%} |"
             )
         args.markdown_output.write_text("\n".join(lines) + "\n")
 

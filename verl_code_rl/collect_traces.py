@@ -38,6 +38,18 @@ def load_tasks(path: Path, split: str, limit: int, dataset: str) -> list[dict[st
     return rows
 
 
+def shard_tasks(tasks: list[dict[str, Any]], modulo: int, remainder: int) -> list[dict[str, Any]]:
+    """Select a deterministic task-id shard without relying on input ordering."""
+    if modulo <= 1:
+        return tasks
+    if not 0 <= remainder < modulo:
+        raise ValueError("task-shard remainder must be in [0, modulo)")
+    return [
+        task for task in tasks
+        if int(hashlib.sha256(str(task["task_id"]).encode()).hexdigest(), 16) % modulo == remainder
+    ]
+
+
 def _messages(prompt: str, procedure: str = "") -> list[dict[str, str]]:
     content = (
         "Complete the following Python function. Return only the complete code "
@@ -59,6 +71,7 @@ def _call_model(
     temperature: float,
     max_tokens: int,
     retries: int,
+    messages: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     started = time.time()
     last_error = ""
@@ -66,7 +79,7 @@ def _call_model(
         try:
             resp = client.chat.completions.create(
                 model=model,
-                messages=_messages(task["prompt"], procedure),
+                messages=messages or _messages(task["prompt"], procedure),
                 temperature=temperature,
                 max_tokens=max_tokens,
             )
@@ -79,6 +92,8 @@ def _call_model(
                 "completion": completion,
                 "code": code,
                 "latency": time.time() - started,
+                "prompt_tokens": int(getattr(resp.usage, "prompt_tokens", 0) or 0),
+                "completion_tokens": int(getattr(resp.usage, "completion_tokens", 0) or 0),
             }
         except Exception as exc:  # noqa: BLE001
             last_error = f"{type(exc).__name__}: {str(exc)[:240]}"
@@ -90,11 +105,13 @@ def _call_model(
         "completion": "",
         "code": "",
         "latency": time.time() - started,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
     }
 
 
-def _mock_result(task: dict[str, Any], model_role: str, cycle: int) -> dict[str, Any]:
-    digest = int(hashlib.md5(f"{task['task_id']}|{model_role}|{cycle}".encode()).hexdigest(), 16)
+def _mock_result(task: dict[str, Any], model_role: str, cycle: int, sample: int = 0) -> dict[str, Any]:
+    digest = int(hashlib.md5(f"{task['task_id']}|{model_role}|{cycle}|{sample}".encode()).hexdigest(), 16)
     threshold = 7 if model_role == "small" else 9
     ok = digest % 10 < threshold
     code = (
@@ -108,7 +125,78 @@ def _mock_result(task: dict[str, Any], model_role: str, cycle: int) -> dict[str,
         "completion": code,
         "code": code,
         "latency": 0.0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
     }
+
+
+def _call_with_repair(
+    *,
+    client: OpenAI,
+    model: str,
+    task: dict[str, Any],
+    procedure: str,
+    temperature: float,
+    max_tokens: int,
+    retries: int,
+    repair_turns: int,
+) -> dict[str, Any]:
+    """Generate code and, optionally, let the same model repair failing code.
+
+    The final result remains the serving outcome.  ``turns`` preserves the
+    compact trajectory required for self-repair SFT extraction.
+    """
+    messages = _messages(task["prompt"], procedure)
+    turns: list[dict[str, Any]] = []
+    total_latency = 0.0
+    total_prompt_tokens = 0
+    total_completion_tokens = 0
+    result: dict[str, Any] | None = None
+    for turn in range(max(0, repair_turns) + 1):
+        result = _call_model(
+            client=client, model=model, task=task, procedure=procedure,
+            temperature=temperature, max_tokens=max_tokens, retries=retries,
+            messages=messages,
+        )
+        total_latency += float(result["latency"])
+        total_prompt_tokens += int(result["prompt_tokens"])
+        total_completion_tokens += int(result["completion_tokens"])
+        turns.append({
+            "turn": turn,
+            "completion": result["completion"],
+            "code": result["code"],
+            "success": result["success"],
+            "error": result["error"],
+        })
+        if result["success"] or turn >= repair_turns:
+            break
+        messages = messages + [
+            {"role": "assistant", "content": result["completion"]},
+            {
+                "role": "user",
+                "content": (
+                    "The submitted code failed the tests with:\n"
+                    f"{result['error']}\n\nRepair it. Return only the complete Python code."
+                ),
+            },
+        ]
+    assert result is not None
+    result = dict(result)
+    result.update({
+        "latency": total_latency,
+        "prompt_tokens": total_prompt_tokens,
+        "completion_tokens": total_completion_tokens,
+        "turns": turns,
+        "initial_success": bool(turns[0]["success"]),
+    })
+    return result
+
+
+def _priced_cost(result: dict[str, Any], input_per_million: float, output_per_million: float) -> float:
+    return (
+        float(result.get("prompt_tokens", 0)) * input_per_million
+        + float(result.get("completion_tokens", 0)) * output_per_million
+    ) / 1_000_000
 
 
 def _load_router(path: str | None):
@@ -137,6 +225,71 @@ def _router_route(router, prompt: str, threshold: float) -> tuple[str, float | N
         return ("large" if pred else "small"), None
 
 
+def _apply_policy(
+    *,
+    route: str,
+    route_prob: float | None,
+    small: dict[str, Any],
+    large: dict[str, Any],
+    large_skipped: bool,
+    small_model: str,
+    large_model: str,
+    small_cost: float,
+    large_cost: float,
+) -> dict[str, Any]:
+    """Compute deployment semantics separately from oracle collection.
+
+    A route to ``small`` is a cascade: use small and fall back to large only on
+    a failed execution.  A route to ``large`` bypasses the small result.  During
+    oracle collection both results are normally available; probe-only rows keep
+    unknown fields rather than fabricating a large outcome.
+    """
+    if route == "large":
+        if large_skipped:
+            return {
+                "policy_final_model": large_model,
+                "policy_final_success": None,
+                "policy_total_cost": None,
+                "policy_total_latency": None,
+                "policy_decision": "policy:route_large(unknown:large_skipped)",
+                "policy_used_fallback": False,
+            }
+        return {
+            "policy_final_model": large_model,
+            "policy_final_success": bool(large["success"]),
+            "policy_total_cost": large_cost,
+            "policy_total_latency": float(large["latency"]),
+            "policy_decision": "policy:route_large",
+            "policy_used_fallback": False,
+        }
+    if small["success"]:
+        return {
+            "policy_final_model": small_model,
+            "policy_final_success": True,
+            "policy_total_cost": small_cost,
+            "policy_total_latency": float(small["latency"]),
+            "policy_decision": "policy:small_ok",
+            "policy_used_fallback": False,
+        }
+    if large_skipped:
+        return {
+            "policy_final_model": large_model,
+            "policy_final_success": None,
+            "policy_total_cost": None,
+            "policy_total_latency": None,
+            "policy_decision": "policy:small_fail->large(unknown:large_skipped)",
+            "policy_used_fallback": True,
+        }
+    return {
+        "policy_final_model": large_model,
+        "policy_final_success": bool(large["success"]),
+        "policy_total_cost": small_cost + large_cost,
+        "policy_total_latency": float(small["latency"]) + float(large["latency"]),
+        "policy_decision": "policy:small_fail->large",
+        "policy_used_fallback": True,
+    }
+
+
 def _collect_one(
     task: dict[str, Any],
     *,
@@ -153,31 +306,43 @@ def _collect_one(
     temperature: float,
     max_tokens: int,
     retries: int,
+    small_samples: int,
+    repair_turns: int,
+    small_input_cost_per_million: float,
+    small_output_cost_per_million: float,
+    large_input_cost_per_million: float,
+    large_output_cost_per_million: float,
 ) -> dict[str, Any]:
     prompt = task["prompt"]
     procedure = skillbook.get_procedure(prompt) if skillbook else ""
     route, route_prob = _router_route(router, prompt, router_threshold)
 
-    if mock:
-        small = _mock_result(task, "small", cycle)
-    else:
-        small = _call_model(
-            client=small_client,
-            model=small_model,
-            task=task,
-            procedure=procedure,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            retries=retries,
-        )
+    small_rollouts: list[dict[str, Any]] = []
+    for sample in range(max(1, small_samples)):
+        if mock:
+            sample_result = _mock_result(task, "small", cycle, sample=sample)
+            sample_result["turns"] = [{"turn": 0, **sample_result}]
+            sample_result["initial_success"] = sample_result["success"]
+        else:
+            sample_result = _call_with_repair(
+                client=small_client, model=small_model, task=task, procedure=procedure,
+                temperature=temperature, max_tokens=max_tokens, retries=retries,
+                repair_turns=repair_turns,
+            )
+        small_rollouts.append(sample_result)
+    # The first rollout is the actual small-first serving attempt.  The complete
+    # sample set estimates P(small fails) for the router target.
+    small = small_rollouts[0]
 
     should_run_large = force_both or (not small["success"]) or route == "large"
     large_skipped = not should_run_large
     if should_run_large:
         if mock:
             large = _mock_result(task, "large", cycle)
+            large["turns"] = [{"turn": 0, **large}]
+            large["initial_success"] = large["success"]
         else:
-            large = _call_model(
+            large = _call_with_repair(
                 client=large_client,
                 model=large_model,
                 task=task,
@@ -185,9 +350,20 @@ def _collect_one(
                 temperature=temperature,
                 max_tokens=max_tokens,
                 retries=retries,
+                repair_turns=repair_turns,
             )
     else:
-        large = {"success": False, "error": "", "completion": "", "code": "", "latency": 0.0}
+        large = {
+            "success": False, "error": "", "completion": "", "code": "", "latency": 0.0,
+            "prompt_tokens": 0, "completion_tokens": 0, "turns": [], "initial_success": False,
+        }
+
+    small_cost = _priced_cost(small, small_input_cost_per_million, small_output_cost_per_million)
+    large_cost = _priced_cost(large, large_input_cost_per_million, large_output_cost_per_million)
+    policy = _apply_policy(
+        route=route, route_prob=route_prob, small=small, large=large, large_skipped=large_skipped,
+        small_model=small_model, large_model=large_model, small_cost=small_cost, large_cost=large_cost,
+    )
 
     if small["success"]:
         final_model = small_model
@@ -198,6 +374,7 @@ def _collect_one(
         final_success = bool(large["success"])
         decision = f"probe:small_fail->large_{'OK' if large['success'] else 'fail'}"
 
+    small_pass_count = sum(bool(item["success"]) for item in small_rollouts)
     return {
         "task_id": task["task_id"],
         "dataset": _dataset_name(task["task_id"], task),
@@ -212,8 +389,10 @@ def _collect_one(
         "small_success": bool(small["success"]),
         "large_success": bool(large["success"]),
         "large_skipped": large_skipped,
-        "final_model": final_model,
-        "final_success": final_success,
+        "oracle_final_model": final_model,
+        "oracle_final_success": final_success,
+        "final_model": policy["policy_final_model"],
+        "final_success": policy["policy_final_success"],
         "small_completion": small["completion"],
         "large_completion": large["completion"],
         "small_code": small["code"],
@@ -222,9 +401,22 @@ def _collect_one(
         "large_error": large["error"],
         "small_latency": small["latency"],
         "large_latency": large["latency"],
+        "small_prompt_tokens": small["prompt_tokens"],
+        "small_completion_tokens": small["completion_tokens"],
+        "large_prompt_tokens": large["prompt_tokens"],
+        "large_completion_tokens": large["completion_tokens"],
+        "small_cost": small_cost,
+        "large_cost": large_cost,
+        "small_samples": len(small_rollouts),
+        "small_pass_count": small_pass_count,
+        "small_pass_rate": small_pass_count / len(small_rollouts),
+        "small_initial_success": bool(small.get("initial_success", small["success"])),
+        "small_turns": small.get("turns", []),
+        "large_turns": large.get("turns", []),
         "policy_route": route,
         "policy_router_prob": route_prob,
         "has_procedure": bool(procedure),
+        **policy,
     }
 
 
@@ -245,14 +437,35 @@ def main() -> int:
     parser.add_argument("--skillbook", default="")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--workers", type=int, default=16)
-    parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--max-tokens", type=int, default=768)
     parser.add_argument("--retries", type=int, default=3)
+    parser.add_argument("--small-samples", type=int, default=1,
+                        help="Independent small rollouts per task for P(small fail) estimation.")
+    parser.add_argument("--max-repair-turns", type=int, default=0,
+                        help="Extra test-feedback repair attempts per model rollout.")
+    parser.add_argument("--task-modulo", type=int, default=1)
+    parser.add_argument("--task-remainder", type=int, default=0)
+    parser.add_argument("--small-input-cost-per-million", type=float,
+                        default=float(os.environ.get("SMALL_INPUT_COST_PER_MILLION", "0")))
+    parser.add_argument("--small-output-cost-per-million", type=float,
+                        default=float(os.environ.get("SMALL_OUTPUT_COST_PER_MILLION", "0")))
+    parser.add_argument("--large-input-cost-per-million", type=float,
+                        default=float(os.environ.get("LARGE_INPUT_COST_PER_MILLION", "0")))
+    parser.add_argument("--large-output-cost-per-million", type=float,
+                        default=float(os.environ.get("LARGE_OUTPUT_COST_PER_MILLION", "0")))
     parser.add_argument("--probe-only", action="store_true",
                         help="Skip the large model when small already passes and router chooses small.")
     args = parser.parse_args()
 
-    tasks = load_tasks(args.data, args.split, args.limit, args.dataset)
+    # Apply a deterministic shard before the optional limit.  Otherwise a small
+    # smoke limit can accidentally contain no examples for a router shard.
+    tasks = shard_tasks(
+        load_tasks(args.data, args.split, -1, args.dataset),
+        args.task_modulo, args.task_remainder,
+    )
+    if args.limit >= 0:
+        tasks = tasks[:args.limit]
     args.out.parent.mkdir(parents=True, exist_ok=True)
     mock = os.environ.get("SCALING_MOCK", "0") == "1"
 
@@ -291,6 +504,12 @@ def main() -> int:
                 temperature=args.temperature,
                 max_tokens=args.max_tokens,
                 retries=args.retries,
+                small_samples=args.small_samples,
+                repair_turns=args.max_repair_turns,
+                small_input_cost_per_million=args.small_input_cost_per_million,
+                small_output_cost_per_million=args.small_output_cost_per_million,
+                large_input_cost_per_million=args.large_input_cost_per_million,
+                large_output_cost_per_million=args.large_output_cost_per_million,
             )
             for task in tasks
         ]
