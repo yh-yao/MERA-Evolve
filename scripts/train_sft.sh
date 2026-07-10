@@ -33,6 +33,9 @@ SFT_EXPERIMENT_NAME="${SFT_EXPERIMENT_NAME:-sft}"
 LORA_RANK="${LORA_RANK:-16}"
 LORA_ALPHA="${LORA_ALPHA:-32}"
 LORA_TARGET_MODULES="${LORA_TARGET_MODULES:-[q_proj,k_proj,v_proj,o_proj]}"
+# Path to a previous cycle's adapter to continue training, keeping MODEL_PATH
+# as the original base checkpoint (mirrors train_grpo.sh's LORA_ADAPTER_PATH).
+LORA_ADAPTER_PATH="${LORA_ADAPTER_PATH:-}"
 
 LORA_ARGS=()
 if [[ "$LORA_RANK" -gt 0 ]]; then
@@ -41,6 +44,7 @@ if [[ "$LORA_RANK" -gt 0 ]]; then
     model.lora_alpha="$LORA_ALPHA"
     model.target_modules="$LORA_TARGET_MODULES"
   )
+  [[ -n "$LORA_ADAPTER_PATH" ]] && LORA_ARGS+=(model.lora_adapter_path="$LORA_ADAPTER_PATH")
 fi
 
 if [[ ! -f "$SFT_DATA" ]]; then

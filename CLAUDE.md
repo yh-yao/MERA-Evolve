@@ -235,3 +235,12 @@ this is the only way to exercise the full pipeline shape without GPUs.
 - `verl_code_rl/code_eval.py` is deliberately stdlib-only because it's
   imported directly by the verl reward function subprocess/worker path — don't
   add heavy dependencies there.
+- `scripts/serve_vllm.sh` defaults `--enforce-eager` on and
+  `VLLM_USE_FLASHINFER_SAMPLER=0` for this node: with CUDA graphs enabled, a
+  `torch.AcceleratorError: CUDA error: an illegal memory access` reproduced
+  twice under concurrent eval load (consistently after ~480-510 requests);
+  with the flashinfer sampler enabled, its JIT-compiled kernel targets this
+  node's local CUDA toolchain rather than torch's bundled runtime and crashes
+  the engine on the first sampling call. Both are opt-out via
+  `ENFORCE_EAGER=0` / `VLLM_USE_FLASHINFER_SAMPLER=1` if a fixed vLLM version
+  or matching toolchain is available later.

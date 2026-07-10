@@ -27,6 +27,9 @@ WORKERS="${WORKERS:-16}"
 SPLIT="${SPLIT:-train}"
 DATASET="${DATASET:-all}"
 SKIP_TRAIN="${SKIP_TRAIN:-0}"
+# Independent of SKIP_TRAIN: skip GRPO specifically while still running SFT
+# (when ENABLE_SFT=1) each cycle -- e.g. to isolate SFT+skills' own effect.
+SKIP_GRPO="${SKIP_GRPO:-0}"
 MOCK="${MOCK:-0}"
 PROBE_ONLY="${PROBE_ONLY:-0}"
 SMALL_SAMPLES="${SMALL_SAMPLES:-1}"
@@ -221,9 +224,17 @@ for ((cycle=0; cycle<N_CYCLES; cycle++)); do
   UPDATED_MODEL=0
   if [[ "$SKIP_TRAIN" != "1" ]]; then
     if [[ "$ENABLE_SFT" == "1" && -s "$OUT/sft_pairs.parquet" ]]; then
+      # Same reasoning as the GRPO block below: verl's model.path must be a
+      # loadable full checkpoint, so CURRENT_MODEL (which may already be a
+      # bare adapter dir from a prior cycle) is never passed as MODEL_PATH --
+      # it's forwarded as LORA_ADAPTER_PATH for continuation instead.
+      PREV_SFT_LORA_ADAPTER=""
+      [[ -f "$CURRENT_MODEL/adapter_config.json" ]] && PREV_SFT_LORA_ADAPTER="$CURRENT_MODEL"
+
       SFT_DATA="$OUT/sft_pairs.parquet" \
       SFT_OUTPUT_DIR="$OUT/sft_adapter" \
-      MODEL_PATH="$CURRENT_MODEL" \
+      MODEL_PATH="$BASE_SMALL_MODEL" \
+      LORA_ADAPTER_PATH="$PREV_SFT_LORA_ADAPTER" \
         scripts/train_sft.sh
       if [[ -d "$OUT/sft_adapter" ]]; then
         CURRENT_MODEL="$OUT/sft_adapter"
@@ -231,35 +242,37 @@ for ((cycle=0; cycle<N_CYCLES; cycle++)); do
       fi
     fi
 
-    # If CURRENT_MODEL is already a LoRA adapter (a prior cycle's output),
-    # continue training it via verl's lora_adapter_path, loaded on top of the
-    # pinned base -- do NOT pass the adapter dir itself as MODEL_PATH.
-    PREV_LORA_ADAPTER=""
-    [[ -f "$CURRENT_MODEL/adapter_config.json" ]] && PREV_LORA_ADAPTER="$CURRENT_MODEL"
+    if [[ "$SKIP_GRPO" != "1" ]]; then
+      # If CURRENT_MODEL is already a LoRA adapter (a prior cycle's output),
+      # continue training it via verl's lora_adapter_path, loaded on top of the
+      # pinned base -- do NOT pass the adapter dir itself as MODEL_PATH.
+      PREV_LORA_ADAPTER=""
+      [[ -f "$CURRENT_MODEL/adapter_config.json" ]] && PREV_LORA_ADAPTER="$CURRENT_MODEL"
 
-    TRAIN_FILE="$OUT/processed/train.parquet" \
-    VAL_FILE="$OUT/processed/val.parquet" \
-    MODEL_PATH="$BASE_SMALL_MODEL" \
-    LORA_ADAPTER_PATH="$PREV_LORA_ADAPTER" \
-    PROJECT_NAME="mera_evolve" \
-    EXPERIMENT_NAME="${EXPERIMENT_NAME}_cycle_${cycle}" \
-    OUTPUT_DIR="$OUT/verl_checkpoints" \
-      scripts/train_grpo.sh
+      TRAIN_FILE="$OUT/processed/train.parquet" \
+      VAL_FILE="$OUT/processed/val.parquet" \
+      MODEL_PATH="$BASE_SMALL_MODEL" \
+      LORA_ADAPTER_PATH="$PREV_LORA_ADAPTER" \
+      PROJECT_NAME="mera_evolve" \
+      EXPERIMENT_NAME="${EXPERIMENT_NAME}_cycle_${cycle}" \
+      OUTPUT_DIR="$OUT/verl_checkpoints" \
+        scripts/train_grpo.sh
 
-    latest="$(find "$OUT/verl_checkpoints" -type d -name 'global_step_*' 2>/dev/null | sort -V | tail -1 || true)"
-    if [[ -n "$latest" ]]; then
-      # Prefer the LoRA adapter verl writes when LORA_RANK>0
-      # ($latest/actor/lora_adapter/{adapter_config.json,adapter_model.safetensors}),
-      # matching router-skills-evolve's grpo_adapter > full-checkpoint priority.
-      if [[ -f "$latest/actor/lora_adapter/adapter_config.json" ]]; then
-        CURRENT_MODEL="$latest/actor/lora_adapter"
-      elif [[ -d "$latest/actor" ]]; then
-        CURRENT_MODEL="$latest/actor"
-      else
-        CURRENT_MODEL="$latest"
+      latest="$(find "$OUT/verl_checkpoints" -type d -name 'global_step_*' 2>/dev/null | sort -V | tail -1 || true)"
+      if [[ -n "$latest" ]]; then
+        # Prefer the LoRA adapter verl writes when LORA_RANK>0
+        # ($latest/actor/lora_adapter/{adapter_config.json,adapter_model.safetensors}),
+        # matching router-skills-evolve's grpo_adapter > full-checkpoint priority.
+        if [[ -f "$latest/actor/lora_adapter/adapter_config.json" ]]; then
+          CURRENT_MODEL="$latest/actor/lora_adapter"
+        elif [[ -d "$latest/actor" ]]; then
+          CURRENT_MODEL="$latest/actor"
+        else
+          CURRENT_MODEL="$latest"
+        fi
+        UPDATED_MODEL=1
+        echo "[pipeline] next cycle small model: $CURRENT_MODEL"
       fi
-      UPDATED_MODEL=1
-      echo "[pipeline] next cycle small model: $CURRENT_MODEL"
     fi
 
     if [[ "$RUN_POST_TRAIN_EVAL" == "1" && "$UPDATED_MODEL" == "1" ]]; then

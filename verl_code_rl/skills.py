@@ -66,7 +66,7 @@ def _render_sections(
     procedure: list[str],
     pitfalls: list[str],
     patterns: list[str],
-    max_chars: int = 3000,
+    max_chars: int = 4000,
 ) -> str:
     """Render a skill like a real runbook: distinct, independently scannable
     sections instead of one paragraph the model has to parse unstructured."""
@@ -144,7 +144,7 @@ def _parse_pitfalls_and_patterns(text: str) -> tuple[list[str], list[str]]:
         if bucket is not None and stripped.startswith(("-", "*")):
             item = stripped.lstrip("-*").strip()
             if item:
-                bucket.append(item[:200])
+                bucket.append(item[:400])
     return pitfalls[:4], patterns[:4]
 
 
