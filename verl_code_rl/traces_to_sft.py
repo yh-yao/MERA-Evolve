@@ -1,8 +1,11 @@
 """Extract teacher and self-repair SFT pairs from MERA oracle traces.
 
-This module deliberately only prepares an interoperable JSONL artifact.  The
-choice of SFT launcher is environment-specific (FSDP/LoRA/verl version), while
-the subsequent RL phase remains the existing verl GRPO invocation.
+Writes parquet with a `messages` column -- the full conversation including
+the assistant's target completion as the final turn -- matching verl's native
+`MultiTurnSFTDataset` contract (`verl/utils/dataset/multiturn_sft_dataset.py`:
+it reads `messages` directly from parquet and computes the loss mask from
+`role == "assistant"`; it does not read a separate `completion` field). The
+subsequent RL phase remains the existing verl GRPO invocation.
 """
 
 from __future__ import annotations
@@ -30,6 +33,7 @@ def _task(row: dict[str, Any]) -> dict[str, Any]:
         "prompt": row["prompt"],
         "entry_point": row["entry_point"],
         "test": row["test"],
+        "dataset": row.get("dataset", ""),
     }
 
 
@@ -39,15 +43,14 @@ def extract_pairs(rows: list[dict[str, Any]], skillbook: SkillBook | None = None
         if not row.get("prompt"):
             continue
         task = _task(row)
-        procedure = skillbook.get_procedure(task["prompt"]) if skillbook else ""
+        procedure = skillbook.get_procedure(task["prompt"], task["dataset"]) if skillbook else ""
         prompt = _make_prompt(task, procedure=procedure)
         # Teacher distillation: the student failed, teacher passed.
         if row.get("small_success") is False and row.get("large_success") is True:
             completion = str(row.get("large_code") or row.get("large_completion") or "").strip()
             if completion:
                 pairs.append({
-                    "messages": prompt,
-                    "completion": completion,
+                    "messages": prompt + [{"role": "assistant", "content": completion}],
                     "source": "teacher",
                     "task_id": row.get("task_id"),
                     "has_procedure": bool(procedure),
@@ -61,8 +64,8 @@ def extract_pairs(rows: list[dict[str, Any]], skillbook: SkillBook | None = None
                     "messages": prompt + [
                         {"role": "assistant", "content": str(turns[0].get("completion") or "")},
                         {"role": "user", "content": "Repair the failing solution and return only complete Python code."},
+                        {"role": "assistant", "content": completion},
                     ],
-                    "completion": completion,
                     "source": "self_repair",
                     "task_id": row.get("task_id"),
                     "has_procedure": bool(procedure),
@@ -85,9 +88,10 @@ def main() -> int:
                 continue
     pairs = extract_pairs(rows, _load_skillbook(args.skillbook))
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    with args.output.open("w") as fh:
-        for pair in pairs:
-            fh.write(json.dumps(pair, ensure_ascii=False) + "\n")
+
+    import pandas as pd
+
+    pd.DataFrame(pairs).to_parquet(args.output, index=False)
     counts = {kind: sum(p["source"] == kind for p in pairs) for kind in ("teacher", "self_repair")}
     print(f"wrote {len(pairs)} SFT pairs -> {args.output}; {counts}")
     return 0

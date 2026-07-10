@@ -27,7 +27,7 @@ def test_skillbook_distills_procedure_from_successes():
     row = _trace("HumanEval/0", "def f():\n", "f", True)
     skillbook.update_from_trace(row, small_model="small", large_model="large")
     assert skillbook.distill_all() == 1
-    procedure = skillbook.get_procedure("def f():\n")
+    procedure = skillbook.get_procedure("def f():\n", "humaneval")
     assert "Procedure" in procedure
     assert "Worked examples" not in procedure
 

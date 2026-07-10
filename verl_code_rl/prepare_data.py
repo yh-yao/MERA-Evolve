@@ -66,8 +66,8 @@ def _load_skillbook(path: Path | None) -> SkillBook | None:
     return skillbook
 
 
-def _procedure_for(skillbook: SkillBook | None, prompt: str) -> str:
-    return skillbook.get_procedure(prompt) if skillbook else ""
+def _procedure_for(skillbook: SkillBook | None, prompt: str, dataset: str = "") -> str:
+    return skillbook.get_procedure(prompt, dataset) if skillbook else ""
 
 
 def _trace_to_raw_task(row: dict[str, Any]) -> dict[str, Any]:
@@ -103,7 +103,7 @@ def convert_rows(
             "test": row["test"],
             "timeout": 10,
         }
-        procedure = _procedure_for(skillbook, task["prompt"])
+        procedure = _procedure_for(skillbook, task["prompt"], dataset)
         out.append({
             "data_source": f"code/{dataset}",
             "prompt": _make_prompt(task, procedure=procedure),

@@ -8,8 +8,10 @@ the training core on `verl`, while adding the useful outer loop from
 - vLLM for rollout inside verl and for standalone evaluation serving
 - rule reward from Python test execution
 - oracle trace collection separated from the deployed routing policy
-- a compact global SkillBook (router owns per-prompt routing)
-- a cost-calibrated learned prompt router
+- a per-dataset SkillBook (one skill each for HumanEval/MBPP; router still owns
+  per-prompt routing, the SkillBook only distills a procedure prefix)
+- a cost-calibrated learned prompt router (frozen text-embedding features, not
+  TF-IDF)
 - held-out policy ablation across large / skills / router / full
 
 ## Layout
@@ -23,7 +25,9 @@ verl_code_rl/prepare_data.py
 verl_code_rl/eval_vllm.py
 verl_code_rl/collect_traces.py
 verl_code_rl/build_skillbook.py
-verl_code_rl/traces_to_sft.py  teacher + self-repair SFT pair extraction
+verl_code_rl/traces_to_sft.py  teacher + self-repair SFT pair extraction (parquet)
+verl_code_rl/extract_sft_lora_adapter.py  reconstructs a loadable LoRA adapter from a verl SFT checkpoint
+verl_code_rl/embedding.py   frozen text-embedding featurizer shared by the router
 verl_code_rl/train_router.py
 verl_code_rl/run_ablation.py
 verl_code_rl/trace_diagnostics.py
@@ -79,7 +83,7 @@ With a cycle skillbook:
 ```bash
 python -m verl_code_rl.prepare_data \
   --traces results/EXP/cycle_0/traces.jsonl \
-  --skillbook results/EXP/cycle_0/skillbook.json \
+  --skillbook results/EXP/cycle_0/skillbook \
   --out-dir results/EXP/cycle_0/processed
 ```
 
@@ -97,7 +101,9 @@ Outputs:
 results/smoke_evolve/cycle_0/
   traces.jsonl
   trace_diagnostics.json
-  skillbook.json
+  skillbook/
+    skill.md
+    skill_statistics.json
   sft_pairs.jsonl
   processed/train.parquet
   processed/val.parquet
@@ -150,6 +156,86 @@ goes straight to the large model, while router-small uses small and falls back
 to large only after a failed execution. The ablation includes this fallback cost
 instead of treating a router-small decision as free.
 
+### SkillBook: one skill per dataset, structured like a real runbook
+
+`extract_signature()` buckets each task by dataset (`humaneval`/`mbpp`), not
+into one global bucket -- HumanEval (docstring + doctest-driven) and MBPP
+(plain-English + assert-driven) are different enough task shapes to deserve
+different solving advice. Each skill is rendered as distinct, independently
+scannable sections (`_render_sections` in `verl_code_rl/skills.py`) rather
+than one flowing paragraph:
+
+```text
+# Skill: humaneval
+## When to use
+...
+## Procedure
+1. ...
+2. ...
+## Common pitfalls
+- ...
+## Recurring patterns
+- ...
+```
+
+`when_to_use`/`procedure` are fixed, hand-written per dataset
+(`_STATIC_SKILL_SECTIONS`) and never change -- they're the scaffolding, always
+present even fully offline. `pitfalls`/`patterns` are the only sections an LLM
+distiller touches (`--distiller-model`, `make_llm_distiller`): it's asked for
+exactly those two labeled bullet lists, grounded in real successful exemplars,
+so a bad distillation can corrupt at most the learned sections, never the
+static scaffolding. Without a distiller configured, those two sections are
+simply empty -- no frequency-counted or fabricated content fills the gap.
+
+To enable it, point `DISTILLER_MODEL` at a CommonStack-hosted model (an
+OpenAI-compatible aggregator, same one `router-skills-evolve` uses --
+`https://api.commonstack.ai/v1`, provider-prefixed model ids like
+`openai/gpt-5.5`):
+
+```bash
+DISTILLER_MODEL=openai/gpt-5.5 bash scripts/run_full_pipeline.sh --limit 64
+```
+
+`run_full_pipeline.sh` auto-loads `.env` (never committed) for
+`COMMONSTACK_API_KEY`, and defaults `DISTILLER_BASE_URL` to CommonStack's URL
+-- override either if you'd rather point the distiller at a local model
+instead. Local small/large model traffic never touches CommonStack; only the
+distiller call does.
+
+`--output`/`--previous`/`--skillbook` all point at a **directory**, written by
+`SkillBook.save()` as two files:
+
+```text
+skillbook/
+  skill.md               the real skill -- exactly what gets injected into prompts
+  skill_statistics.json  stats/history/exemplars/pitfalls/patterns skill.md is derived from
+```
+
+`skill.md` is the human-facing artifact -- open it directly to see (and diff,
+across cycles) exactly what's being prepended to prompts. `skill_statistics
+.json` is the source of truth `skill.md` is deterministically re-rendered
+from on load (`Skill.from_dict` calls `_render_sections` again rather than
+trusting a cached string), so the two files can never drift out of sync.
+To measure whether the SkillBook is actually helping, compare two independent
+`eval_vllm.sh` runs on the same held-out split, with and without
+`--skillbook` -- there's no need
+for a dedicated ablation arm for this since `eval_vllm.py`'s `--skillbook` flag
+is already optional and independent of routing.
+
+### Router: frozen embedding features, not TF-IDF
+
+`train_router.py` featurizes prompts with a frozen text-embedding model
+(`verl_code_rl/embedding.py`, default `Qwen/Qwen3-Embedding-0.6B`, last-token
+pooling) instead of a `TfidfVectorizer`, then fits a `LogisticRegression` head
+on those embeddings. The classifier alone is joblib-dumped to `router.joblib`;
+`router_meta.json` records which embedding model produced its features
+(`embedding_model`), and every caller (`collect_traces.py`, `run_ablation.py`)
+reads that field back so training and inference always agree on the
+featurizer. Override the embedding model with `--embed-model` /
+`ROUTER_EMBED_MODEL`. This is a genuine semantic signal rather than a
+bag-of-words one, at the cost of a forward pass per routing decision instead
+of near-zero-cost string vectorization.
+
 The Router learns a failure probability from `SMALL_SAMPLES` independent small
 rollouts. Its threshold is selected on a distinct deterministic task-id shard,
 not on its training traces. Set actual model rates to make cost units USD:
@@ -181,8 +267,32 @@ score the old server.
 ### Optional SFT warm start
 
 `traces_to_sft.py` extracts teacher pairs (`small fail ∧ large pass`) and
-self-repair pairs. `verl` remains the GRPO trainer. SFT launchers differ by the
-installed verl/FSDP version, so it is explicitly supplied rather than guessed:
+self-repair pairs, writing **parquet** with a `messages` column whose final
+turn is the assistant's actual completion -- this matches verl's native
+`MultiTurnSFTDataset` contract exactly (it reads `messages` directly and
+computes the loss mask from `role == "assistant"`; it does not read a separate
+`completion` field).
+
+```bash
+ENABLE_SFT=1 bash scripts/run_full_pipeline.sh --limit 64
+```
+
+By default `scripts/train_sft.sh` runs verl's own native SFT trainer
+(`torchrun -m verl.trainer.sft_trainer`), LoRA by default (same algorithm as
+`train_grpo.sh`: `LORA_RANK=16`/`LORA_ALPHA=32`/`LORA_TARGET_MODULES=
+[q_proj,k_proj,v_proj,o_proj]`). verl's generic FSDP checkpoint saver doesn't
+write a `lora_adapter/adapter_config.json` the way the GRPO actor does (that
+logic is specific to `verl/workers/fsdp_workers.py`'s PPO path, not shared by
+the SFT trainer) -- `scripts/train_sft.sh` runs `verl_code_rl/
+extract_sft_lora_adapter.py` right after training to reconstruct the
+LoRA-wrapped model and re-save just the adapter via PEFT's own
+`save_pretrained`, written directly to `SFT_OUTPUT_DIR` so it's immediately
+loadable by `serve_vllm.sh` and picked up by the next GRPO cycle's
+`LORA_ADAPTER_PATH` continuation. This extractor currently only supports
+single-GPU (`N_GPUS=1`, FSDP `NO_SHARD`) checkpoints.
+
+If your verl installation's SFT trainer differs, set `SFT_TRAIN_CMD` to
+override with your own version-pinned launcher instead:
 
 ```bash
 ENABLE_SFT=1 \
@@ -216,7 +326,7 @@ Evaluate with a distilled skill prefix:
 
 ```bash
 MODEL=Qwen/Qwen2.5-Coder-1.5B-Instruct PORT=8000 \
-scripts/eval_vllm.sh --skillbook results/EXP/cycle_0/skillbook.json \
+scripts/eval_vllm.sh --skillbook results/EXP/cycle_0/skillbook \
   --out results/qwen25_1p5b_skill_eval.jsonl
 ```
 
@@ -261,6 +371,42 @@ actor_rollout_ref.rollout.n=$N_GENERATIONS
 
 so rollouts are generated through verl's vLLM backend and scored by local Python
 test execution.
+
+### LoRA is the default training mode
+
+`scripts/train_grpo.sh` trains a LoRA adapter (`LORA_RANK=16`, `LORA_ALPHA=32`,
+`LORA_TARGET_MODULES=[q_proj,k_proj,v_proj,o_proj]`) on a frozen base model by
+default, matching the algorithm `router-skills-evolve` uses for its HumanEval
+GRPO trainer: train against the raw base model, produce an adapter, then hand
+that adapter to serving. Set `LORA_RANK=0` to fall back to full-parameter
+fine-tuning.
+
+verl syncs the adapter into its own internal vLLM rollout engine every step via
+vLLM's dynamic `add_lora`/`remove_lora` API — no `--enable-lora` flag needs to
+be passed to that internal engine manually. The trained adapter is written to
+`global_step_N/actor/lora_adapter/` (`adapter_config.json` +
+`adapter_model.safetensors`); `scripts/run_full_pipeline.sh` picks this up as
+the next cycle's `CURRENT_MODEL` in preference to the full checkpoint.
+`scripts/serve_vllm.sh` already auto-detects a LoRA adapter directory (checks
+for `adapter_config.json`, resolves the base model from it) and serves it with
+`vllm serve <base> --enable-lora --lora-modules <name>=<adapter_dir>
+--enforce-eager` — this is the same kill-and-relaunch handoff
+`router-skills-evolve` uses (no live/dynamic reload API; `SMALL_RELOAD_CMD`
+just restarts the standalone serving process pointed at the new adapter).
+
+Across multiple cycles, `actor_rollout_ref.model.path` must stay pinned to the
+original base checkpoint (verl loads it fresh with `AutoModelForCausalLM`,
+which can't load a bare adapter directory). `run_full_pipeline.sh` therefore
+tracks `BASE_SMALL_MODEL` separately from `CURRENT_MODEL`: once `CURRENT_MODEL`
+becomes an adapter dir, it's passed to `scripts/train_grpo.sh` as
+`LORA_ADAPTER_PATH`, which forwards it as `actor_rollout_ref.model.
+lora_adapter_path` so verl continues training the *same* adapter next cycle
+(loaded via `PeftModel.from_pretrained(..., is_trainable=True)`), rather than
+starting a fresh one each cycle. This differs slightly from
+`router-skills-evolve`'s own algorithm, which merges the previous adapter into
+the base and attaches a brand-new LoRA each cycle (to keep the GRPO KL
+reference clean) — verl has no built-in merge-then-fresh option, so this repo
+uses verl's native continuation mechanism instead.
 
 ## Notes
 

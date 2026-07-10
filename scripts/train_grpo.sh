@@ -17,8 +17,8 @@ ROLLOUT_TP="${ROLLOUT_TP:-1}"
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-64}"
 VAL_BATCH_SIZE="${VAL_BATCH_SIZE:-128}"
 PPO_MINI_BATCH_SIZE="${PPO_MINI_BATCH_SIZE:-16}"
-PPO_MICRO_BATCH_SIZE_PER_GPU="${PPO_MICRO_BATCH_SIZE_PER_GPU:-1}"
-LOG_PROB_MICRO_BATCH_SIZE_PER_GPU="${LOG_PROB_MICRO_BATCH_SIZE_PER_GPU:-4}"
+PPO_MICRO_BATCH_SIZE_PER_GPU="${PPO_MICRO_BATCH_SIZE_PER_GPU:-8}"
+LOG_PROB_MICRO_BATCH_SIZE_PER_GPU="${LOG_PROB_MICRO_BATCH_SIZE_PER_GPU:-16}"
 N_GENERATIONS="${N_GENERATIONS:-8}"
 
 MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-1536}"
@@ -32,9 +32,36 @@ TEST_FREQ="${TEST_FREQ:-10}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.5}"
 OUTPUT_DIR="${OUTPUT_DIR:-}"
 
+# LoRA is the default training mode, matching router-skills-evolve's HumanEval
+# GRPO algorithm (frozen base + trained adapter, r=16). Set LORA_RANK=0 to fall
+# back to full-parameter fine-tuning.
+LORA_RANK="${LORA_RANK:-16}"
+LORA_ALPHA="${LORA_ALPHA:-32}"
+LORA_TARGET_MODULES="${LORA_TARGET_MODULES:-[q_proj,k_proj,v_proj,o_proj]}"
+# Path to a previous cycle's adapter to continue training, keeping MODEL_PATH
+# as the original base checkpoint (verl loads base + this adapter together).
+LORA_ADAPTER_PATH="${LORA_ADAPTER_PATH:-}"
+
 if [[ ! -f "$TRAIN_FILE" || ! -f "$VAL_FILE" ]]; then
   echo "[train_grpo] missing parquet files. Run scripts/prepare_data.sh first." >&2
   exit 2
+fi
+
+# verl's vLLM rollout engine syncs LoRA weights into itself every step via its
+# own dynamic add_lora/remove_lora API (see vllm_rollout/utils.py) whenever
+# lora_rank>0 -- no --enable-lora server flag needs to be passed by us here.
+# load_format=safetensors + layered_summon=True is what makes that adapter-only
+# sync path (vs. a full merged-weight sync) kick in.
+LORA_ARGS=()
+if [[ "$LORA_RANK" -gt 0 ]]; then
+  LORA_ARGS=(
+    actor_rollout_ref.model.lora_rank="$LORA_RANK"
+    actor_rollout_ref.model.lora_alpha="$LORA_ALPHA"
+    actor_rollout_ref.model.target_modules="$LORA_TARGET_MODULES"
+    actor_rollout_ref.rollout.load_format=safetensors
+    actor_rollout_ref.rollout.layered_summon=True
+  )
+  [[ -n "$LORA_ADAPTER_PATH" ]] && LORA_ARGS+=(actor_rollout_ref.model.lora_adapter_path="$LORA_ADAPTER_PATH")
 fi
 
 set -x
@@ -81,4 +108,5 @@ set -x
   trainer.total_epochs="$TOTAL_EPOCHS" \
   'trainer.logger=["console"]' \
   ${OUTPUT_DIR:+trainer.default_local_dir="$OUTPUT_DIR"} \
+  "${LORA_ARGS[@]}" \
   "$@"

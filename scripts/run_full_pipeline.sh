@@ -3,6 +3,15 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# Auto-load .env (COMMONSTACK_API_KEY etc.) if present -- never checked in,
+# .gitignore'd, safe to source into this run's environment only.
+if [[ -f .env ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source .env
+  set +a
+fi
+
 PYTHON="${PYTHON:-python}"
 DATA="${DATA:-data/raw/he_mbpp.jsonl}"
 EXPERIMENT_NAME="${EXPERIMENT_NAME:-mera_evolve_$(date -u +%Y%m%d_%H%M%S)}"
@@ -27,6 +36,11 @@ ROUTER_TRAIN_REMAINDER="${ROUTER_TRAIN_REMAINDER:-0}"
 ROUTER_CALIBRATION_REMAINDER="${ROUTER_CALIBRATION_REMAINDER:-1}"
 ROUTER_TARGET_PASS_RATE="${ROUTER_TARGET_PASS_RATE:-}"
 DISTILLER_MODEL="${DISTILLER_MODEL:-}"
+# CommonStack (OpenAI-compatible aggregator) -- matches router-skills-evolve's
+# src/config.py. Only reached when DISTILLER_MODEL is set (e.g.
+# openai/gpt-5.5); local small/large model calls never touch this.
+DISTILLER_BASE_URL="${DISTILLER_BASE_URL:-https://api.commonstack.ai/v1}"
+DISTILLER_API_KEY="${DISTILLER_API_KEY:-${COMMONSTACK_API_KEY:-}}"
 ENABLE_SFT="${ENABLE_SFT:-0}"
 RUN_POST_TRAIN_EVAL="${RUN_POST_TRAIN_EVAL:-1}"
 SMALL_RELOAD_CMD="${SMALL_RELOAD_CMD:-}"
@@ -134,6 +148,11 @@ EOF
 echo "[pipeline] results=$RESULTS_DIR cycles=$N_CYCLES mock=$MOCK skip_train=$SKIP_TRAIN"
 
 CURRENT_MODEL="$SMALL_MODEL"
+# verl's model.path must always be a loadable full HF checkpoint; once LoRA
+# training starts, CURRENT_MODEL becomes an adapter-only dir (no base weights),
+# so it can never itself be fed back in as model.path. BASE_SMALL_MODEL stays
+# pinned to the original checkpoint across all cycles for that purpose.
+BASE_SMALL_MODEL="$SMALL_MODEL"
 for ((cycle=0; cycle<N_CYCLES; cycle++)); do
   OUT="$RESULTS_DIR/cycle_$cycle"
   mkdir -p "$OUT"
@@ -143,7 +162,7 @@ for ((cycle=0; cycle<N_CYCLES; cycle++)); do
   PREV_SKILLBOOK=""
   PREV_ROUTER=""
   if (( cycle > 0 )); then
-    [[ -f "$RESULTS_DIR/cycle_$((cycle-1))/skillbook.json" ]] && PREV_SKILLBOOK="$RESULTS_DIR/cycle_$((cycle-1))/skillbook.json"
+    [[ -f "$RESULTS_DIR/cycle_$((cycle-1))/skillbook/skill_statistics.json" ]] && PREV_SKILLBOOK="$RESULTS_DIR/cycle_$((cycle-1))/skillbook"
     [[ -f "$RESULTS_DIR/cycle_$((cycle-1))/router/router.joblib" ]] && PREV_ROUTER="$RESULTS_DIR/cycle_$((cycle-1))/router"
   fi
 
@@ -176,12 +195,12 @@ for ((cycle=0; cycle<N_CYCLES; cycle++)); do
   build_args=(
     -m verl_code_rl.build_skillbook
     --traces "$OUT/traces.jsonl"
-    --output "$OUT/skillbook.json"
+    --output "$OUT/skillbook"
     --small-model "$CURRENT_MODEL"
     --large-model "$LARGE_MODEL"
   )
   [[ -n "$PREV_SKILLBOOK" ]] && build_args+=(--previous "$PREV_SKILLBOOK")
-  [[ -n "$DISTILLER_MODEL" ]] && build_args+=(--distiller-model "$DISTILLER_MODEL" --distiller-base-url "$LARGE_BASE_URL" --api-key "$API_KEY")
+  [[ -n "$DISTILLER_MODEL" ]] && build_args+=(--distiller-model "$DISTILLER_MODEL" --distiller-base-url "$DISTILLER_BASE_URL" --api-key "$DISTILLER_API_KEY")
   "$PYTHON" "${build_args[@]}"
 
   "$PYTHON" -m verl_code_rl.trace_diagnostics \
@@ -190,19 +209,19 @@ for ((cycle=0; cycle<N_CYCLES; cycle++)); do
 
   "$PYTHON" -m verl_code_rl.traces_to_sft \
     --traces "$OUT/traces.jsonl" \
-    --skillbook "$OUT/skillbook.json" \
-    --output "$OUT/sft_pairs.jsonl"
+    --skillbook "$OUT/skillbook" \
+    --output "$OUT/sft_pairs.parquet"
 
   "$PYTHON" -m verl_code_rl.prepare_data \
     --traces "$OUT/traces.jsonl" \
     --input "$DATA" \
-    --skillbook "$OUT/skillbook.json" \
+    --skillbook "$OUT/skillbook" \
     --out-dir "$OUT/processed"
 
   UPDATED_MODEL=0
   if [[ "$SKIP_TRAIN" != "1" ]]; then
-    if [[ "$ENABLE_SFT" == "1" && -s "$OUT/sft_pairs.jsonl" ]]; then
-      SFT_DATA="$OUT/sft_pairs.jsonl" \
+    if [[ "$ENABLE_SFT" == "1" && -s "$OUT/sft_pairs.parquet" ]]; then
+      SFT_DATA="$OUT/sft_pairs.parquet" \
       SFT_OUTPUT_DIR="$OUT/sft_adapter" \
       MODEL_PATH="$CURRENT_MODEL" \
         scripts/train_sft.sh
@@ -212,9 +231,16 @@ for ((cycle=0; cycle<N_CYCLES; cycle++)); do
       fi
     fi
 
+    # If CURRENT_MODEL is already a LoRA adapter (a prior cycle's output),
+    # continue training it via verl's lora_adapter_path, loaded on top of the
+    # pinned base -- do NOT pass the adapter dir itself as MODEL_PATH.
+    PREV_LORA_ADAPTER=""
+    [[ -f "$CURRENT_MODEL/adapter_config.json" ]] && PREV_LORA_ADAPTER="$CURRENT_MODEL"
+
     TRAIN_FILE="$OUT/processed/train.parquet" \
     VAL_FILE="$OUT/processed/val.parquet" \
-    MODEL_PATH="$CURRENT_MODEL" \
+    MODEL_PATH="$BASE_SMALL_MODEL" \
+    LORA_ADAPTER_PATH="$PREV_LORA_ADAPTER" \
     PROJECT_NAME="mera_evolve" \
     EXPERIMENT_NAME="${EXPERIMENT_NAME}_cycle_${cycle}" \
     OUTPUT_DIR="$OUT/verl_checkpoints" \
@@ -222,7 +248,12 @@ for ((cycle=0; cycle<N_CYCLES; cycle++)); do
 
     latest="$(find "$OUT/verl_checkpoints" -type d -name 'global_step_*' 2>/dev/null | sort -V | tail -1 || true)"
     if [[ -n "$latest" ]]; then
-      if [[ -d "$latest/actor" ]]; then
+      # Prefer the LoRA adapter verl writes when LORA_RANK>0
+      # ($latest/actor/lora_adapter/{adapter_config.json,adapter_model.safetensors}),
+      # matching router-skills-evolve's grpo_adapter > full-checkpoint priority.
+      if [[ -f "$latest/actor/lora_adapter/adapter_config.json" ]]; then
+        CURRENT_MODEL="$latest/actor/lora_adapter"
+      elif [[ -d "$latest/actor" ]]; then
         CURRENT_MODEL="$latest/actor"
       else
         CURRENT_MODEL="$latest"
@@ -244,7 +275,7 @@ for ((cycle=0; cycle<N_CYCLES; cycle++)); do
     --small-model "$CURRENT_MODEL" --large-model "$LARGE_MODEL"
     --small-base-url "$SMALL_BASE_URL" --large-base-url "$LARGE_BASE_URL" --api-key "$API_KEY"
     --workers "$WORKERS" --small-samples "$SMALL_SAMPLES" --max-repair-turns "$MAX_REPAIR_TURNS"
-    --task-modulo "$ROUTER_TASK_MODULO" --skillbook "$OUT/skillbook.json"
+    --task-modulo "$ROUTER_TASK_MODULO" --skillbook "$OUT/skillbook"
   )
   "$PYTHON" "${router_trace_common[@]}" --task-remainder "$ROUTER_TRAIN_REMAINDER" \
     --out "$OUT/router_train_traces.jsonl"
@@ -268,7 +299,7 @@ for ((cycle=0; cycle<N_CYCLES; cycle++)); do
     --small-model "$CURRENT_MODEL" --large-model "$LARGE_MODEL" \
     --small-base-url "$SMALL_BASE_URL" --large-base-url "$LARGE_BASE_URL" --api-key "$API_KEY" \
     --workers "$WORKERS" --small-samples "$SMALL_SAMPLES" --max-repair-turns "$MAX_REPAIR_TURNS" \
-    --router "$OUT/router" --router-threshold "$ROUTER_THRESHOLD" --skillbook "$OUT/skillbook.json" \
+    --router "$OUT/router" --router-threshold "$ROUTER_THRESHOLD" --skillbook "$OUT/skillbook" \
     --out "$OUT/eval_traces.jsonl"
 
   "$PYTHON" -m verl_code_rl.run_ablation \

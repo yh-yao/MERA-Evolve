@@ -24,7 +24,8 @@ def _call_one(
     skillbook: SkillBook | None,
 ) -> dict:
     started = time.time()
-    procedure = skillbook.get_procedure(task["prompt"]) if skillbook else ""
+    dataset = _dataset_name(task["task_id"], task)
+    procedure = skillbook.get_procedure(task["prompt"], dataset) if skillbook else ""
     problem = f"{procedure}\n\n---\n\n{task['prompt']}" if procedure else task["prompt"]
     messages = [
         {"role": "system", "content": SYSTEM},
@@ -49,7 +50,7 @@ def _call_one(
         ok, error = run_code_tests(task, code)
         return {
             "task_id": task["task_id"],
-            "dataset": _dataset_name(task["task_id"], task),
+            "dataset": dataset,
             "passed": ok,
             "error": error,
             "latency": time.time() - started,
@@ -60,7 +61,7 @@ def _call_one(
     except Exception as exc:  # noqa: BLE001
         return {
             "task_id": task["task_id"],
-            "dataset": _dataset_name(task["task_id"], task),
+            "dataset": dataset,
             "passed": False,
             "error": f"{type(exc).__name__}: {str(exc)[:200]}",
             "latency": time.time() - started,

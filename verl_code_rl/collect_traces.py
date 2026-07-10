@@ -200,28 +200,41 @@ def _priced_cost(result: dict[str, Any], input_per_million: float, output_per_mi
 
 
 def _load_router(path: str | None):
+    """Load the classifier plus the embedding model id it was trained against."""
     if not path:
         return None
-    router_path = Path(path)
-    if router_path.is_dir():
-        router_path = router_path / "router.joblib"
+    router_dir = Path(path)
+    router_path = router_dir / "router.joblib" if router_dir.is_dir() else router_dir
+    meta_path = (router_dir if router_dir.is_dir() else router_dir.parent) / "router_meta.json"
     if not router_path.exists():
         print(f"[collect] router not found: {router_path}", file=sys.stderr)
         return None
     import joblib
 
-    return joblib.load(router_path)
+    from verl_code_rl.embedding import DEFAULT_EMBED_MODEL
+
+    embed_model = DEFAULT_EMBED_MODEL
+    if meta_path.exists():
+        try:
+            embed_model = json.loads(meta_path.read_text()).get("embedding_model", DEFAULT_EMBED_MODEL)
+        except (json.JSONDecodeError, OSError):
+            pass
+    return joblib.load(router_path), embed_model
 
 
 def _router_route(router, prompt: str, threshold: float) -> tuple[str, float | None]:
     if router is None:
         return "small", None
+    clf, embed_model = router
+    from verl_code_rl.embedding import embed
+
+    features = embed([prompt], embed_model)
     try:
-        proba = router.predict_proba([prompt])[0]
+        proba = clf.predict_proba(features)[0]
         prob_large = float(proba[1])
         return ("large" if prob_large >= threshold else "small"), prob_large
     except Exception:  # noqa: BLE001
-        pred = int(router.predict([prompt])[0])
+        pred = int(clf.predict(features)[0])
         return ("large" if pred else "small"), None
 
 
@@ -314,7 +327,8 @@ def _collect_one(
     large_output_cost_per_million: float,
 ) -> dict[str, Any]:
     prompt = task["prompt"]
-    procedure = skillbook.get_procedure(prompt) if skillbook else ""
+    dataset = _dataset_name(task["task_id"], task)
+    procedure = skillbook.get_procedure(prompt, dataset) if skillbook else ""
     route, route_prob = _router_route(router, prompt, router_threshold)
 
     small_rollouts: list[dict[str, Any]] = []
@@ -377,8 +391,8 @@ def _collect_one(
     small_pass_count = sum(bool(item["success"]) for item in small_rollouts)
     return {
         "task_id": task["task_id"],
-        "dataset": _dataset_name(task["task_id"], task),
-        "signature": extract_signature(prompt),
+        "dataset": dataset,
+        "signature": extract_signature(prompt, dataset),
         "prompt": prompt,
         "entry_point": task["entry_point"],
         "test": task["test"],

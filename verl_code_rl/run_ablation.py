@@ -110,11 +110,20 @@ def router_predictions(traces: list[dict[str, Any]], router_dir: Path, threshold
         return [0 for _ in traces]
     import joblib
 
+    from verl_code_rl.embedding import DEFAULT_EMBED_MODEL, embed
+
     router = joblib.load(router_path)
-    prompts = [str(row.get("prompt") or "") for row in traces]
+    meta_path = (router_dir if router_dir.is_dir() else router_dir.parent) / "router_meta.json"
+    embed_model = DEFAULT_EMBED_MODEL
+    if meta_path.exists():
+        try:
+            embed_model = json.loads(meta_path.read_text()).get("embedding_model", DEFAULT_EMBED_MODEL)
+        except (json.JSONDecodeError, OSError):
+            pass
+    features = embed([str(row.get("prompt") or "") for row in traces], embed_model)
     if hasattr(router, "predict_proba"):
-        return [1 if float(prob[1]) >= threshold else 0 for prob in router.predict_proba(prompts)]
-    return [int(x) for x in router.predict(prompts)]
+        return [1 if float(prob[1]) >= threshold else 0 for prob in router.predict_proba(features)]
+    return [int(x) for x in router.predict(features)]
 
 
 def main() -> int:

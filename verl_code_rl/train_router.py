@@ -1,4 +1,11 @@
-"""Train a prompt router from MERA trace rows."""
+"""Train a prompt router from MERA trace rows.
+
+The router predicts P(small model fails) from a frozen text-embedding model
+(see embedding.py) plus a lightweight LogisticRegression head -- no TF-IDF /
+bag-of-words featurizer. The classifier is what gets joblib-dumped; the
+embedding model itself is referenced by id in router_meta.json and reloaded
+(once, cached) by any caller that needs to score new prompts.
+"""
 
 from __future__ import annotations
 
@@ -7,6 +14,8 @@ import json
 import sys
 from pathlib import Path
 from typing import Any
+
+from verl_code_rl.embedding import DEFAULT_EMBED_MODEL, embed
 
 
 def load_examples(path: Path) -> tuple[list[str], list[int], int]:
@@ -63,12 +72,16 @@ def load_binomial_examples(path: Path) -> tuple[list[str], list[int], list[str],
     return prompts, labels, groups, skipped
 
 
-def train(prompts: list[str], labels: list[int], seed: int = 42, groups: list[str] | None = None):
-    from sklearn.feature_extraction.text import TfidfVectorizer
+def train(
+    prompts: list[str],
+    labels: list[int],
+    seed: int = 42,
+    groups: list[str] | None = None,
+    embed_model: str = "",
+):
     from sklearn.linear_model import LogisticRegression
     from sklearn.metrics import accuracy_score, brier_score_loss, f1_score, roc_auc_score
     from sklearn.model_selection import GroupKFold, StratifiedKFold, cross_val_predict
-    from sklearn.pipeline import Pipeline
 
     if len(prompts) < 2:
         raise ValueError("need at least 2 examples to train router")
@@ -79,10 +92,8 @@ def train(prompts: list[str], labels: list[int], seed: int = 42, groups: list[st
         if groups is not None:
             groups = groups + ["__synthetic_complementary_router_class__"]
 
-    pipe = Pipeline([
-        ("tfidf", TfidfVectorizer(max_features=4096, ngram_range=(1, 2))),
-        ("clf", LogisticRegression(max_iter=1000, class_weight="balanced", random_state=seed)),
-    ])
+    embed_model = embed_model or DEFAULT_EMBED_MODEL
+    features = embed(prompts, embed_model)
 
     metrics: dict[str, float | int] = {}
     min_class = min(labels.count(0), labels.count(1))
@@ -93,7 +104,10 @@ def train(prompts: list[str], labels: list[int], seed: int = 42, groups: list[st
             n_splits=splits, shuffle=True, random_state=seed,
         )
         try:
-            probs = cross_val_predict(pipe, prompts, labels, cv=cv, groups=groups, method="predict_proba")[:, 1]
+            probe = LogisticRegression(max_iter=1000, class_weight="balanced", random_state=seed)
+            probs = cross_val_predict(
+                probe, features, labels, cv=cv, groups=groups, method="predict_proba",
+            )[:, 1]
             preds = [1 if p >= 0.5 else 0 for p in probs]
             metrics = {
                 "auc": float(roc_auc_score(labels, probs)),
@@ -115,9 +129,11 @@ def train(prompts: list[str], labels: list[int], seed: int = 42, groups: list[st
             "cv_splits": 0, "cv_grouped_by_task": groups is not None,
         }
 
-    pipe.fit(prompts, labels)
+    clf = LogisticRegression(max_iter=1000, class_weight="balanced", random_state=seed)
+    clf.fit(features, labels)
     meta = {
-        "chosen_featurizer": "tfidf",
+        "chosen_featurizer": "qwen3-embedding",
+        "embedding_model": embed_model,
         "metrics": metrics,
         "n_examples_total": len(prompts),
         "label_distribution": {
@@ -127,7 +143,7 @@ def train(prompts: list[str], labels: list[int], seed: int = 42, groups: list[st
         "threshold_default": 0.5,
         "seed": seed,
     }
-    return pipe, meta
+    return clf, meta
 
 
 def select_threshold(
@@ -136,6 +152,7 @@ def select_threshold(
     target_pass_rate: float | None,
     fallback_small_cost: float,
     fallback_large_cost: float,
+    embed_model: str = "",
 ) -> tuple[float, dict[str, Any]]:
     """Select a cost-minimal cascade threshold on disjoint calibration traces."""
     rows: list[dict[str, Any]] = []
@@ -149,7 +166,8 @@ def select_threshold(
                 rows.append(row)
     if not rows:
         raise ValueError("calibration traces must contain small_success and large_success")
-    probabilities = router.predict_proba([str(row.get("prompt") or "") for row in rows])[:, 1]
+    features = embed([str(row.get("prompt") or "") for row in rows], embed_model or DEFAULT_EMBED_MODEL)
+    probabilities = router.predict_proba(features)[:, 1]
     curve: list[dict[str, float]] = []
     for i in range(1, 100):
         threshold = i / 100
@@ -187,6 +205,8 @@ def main() -> int:
     parser.add_argument("--target-pass-rate", type=float, default=None)
     parser.add_argument("--fallback-small-cost", type=float, default=0.001)
     parser.add_argument("--fallback-large-cost", type=float, default=0.01)
+    parser.add_argument("--embed-model", default=DEFAULT_EMBED_MODEL,
+                        help="Frozen text-embedding model used as the router featurizer.")
     args = parser.parse_args()
 
     prompts, labels, groups, skipped = load_binomial_examples(args.traces)
@@ -195,12 +215,13 @@ def main() -> int:
         f"({sum(labels)} need-large, {len(labels) - sum(labels)} small-ok); skipped={skipped}",
         file=sys.stderr,
     )
-    pipe, meta = train(prompts, labels, seed=args.seed, groups=groups)
+    clf, meta = train(prompts, labels, seed=args.seed, groups=groups, embed_model=args.embed_model)
 
     if args.calibration_traces:
         threshold, calibration = select_threshold(
-            pipe, args.calibration_traces, args.target_pass_rate,
+            clf, args.calibration_traces, args.target_pass_rate,
             args.fallback_small_cost, args.fallback_large_cost,
+            embed_model=args.embed_model,
         )
         meta["threshold_default"] = threshold
         meta["threshold_selection"] = calibration
@@ -208,7 +229,7 @@ def main() -> int:
     import joblib
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    joblib.dump(pipe, args.output_dir / "router.joblib")
+    joblib.dump(clf, args.output_dir / "router.joblib")
     (args.output_dir / "router_meta.json").write_text(json.dumps(meta, indent=2))
     print(f"[router] wrote {args.output_dir / 'router.joblib'}", file=sys.stderr)
     return 0

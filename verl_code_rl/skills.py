@@ -1,28 +1,98 @@
 """Lightweight procedural skills for the MERA evolve loop.
 
-The first MERA version keeps one global skill bucket ("coding"). The skillbook
-therefore does not route by itself; it only stores solved examples and distills
-a stable prompt prefix that can be fed into the small model and verl prompts.
+Skills are bucketed one-per-dataset (HumanEval, MBPP) -- each dataset has a
+distinct task shape (docstring-driven vs. assert-driven), so a single shared
+procedure would blur two genuinely different sets of solving advice. Each
+bucket's procedure is a written, dataset-specific description of how to solve
+that shape of task, not a tally of frequently-seen helper-function names.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import re
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
 
-def extract_signature(prompt: str) -> str:  # noqa: ARG001
-    """All code tasks share one global skill bucket."""
-    return "coding"
+def extract_signature(prompt: str, dataset: str = "") -> str:  # noqa: ARG001
+    """Bucket a task by its dataset. Unknown/missing datasets fall back to "coding"."""
+    dataset = (dataset or "").strip().lower()
+    return dataset if dataset in ("humaneval", "mbpp") else "coding"
 
 
-_CODE_BLOCK = re.compile(r"```[\w+-]*\n(.*?)```", re.DOTALL)
-_CALL = re.compile(r"\b([a-z_][a-z0-9_]{2,})\s*\(")
-_SKIP_CALLS = {"if", "for", "while", "print", "return", "range", "len"}
+_STATIC_SKILL_SECTIONS: dict[str, dict[str, Any]] = {
+    "humaneval": {
+        "when_to_use": (
+            "Task is a HumanEval-style problem: a complete function signature and "
+            "docstring, often with worked examples written as doctests."
+        ),
+        "procedure": [
+            "Read the docstring's examples carefully -- they define the exact "
+            "expected behavior, including edge cases.",
+            "Keep the given function name and signature exactly as written.",
+            "Handle boundary cases explicitly: empty input, negative numbers, "
+            "single-element input, boundary values.",
+            "Return one self-contained function; do not add extra top-level code, "
+            "explanations, or tests.",
+            "Prefer a direct, correct implementation over a clever one-liner.",
+        ],
+    },
+    "mbpp": {
+        "when_to_use": (
+            "Task is an MBPP-style problem: the goal is a plain-English sentence, "
+            "and the exact function name/signature is only implied by the assert "
+            "statements that follow the prompt."
+        ),
+        "procedure": [
+            "Infer the exact function name and argument order from the assert "
+            "statements before writing any code.",
+            "Solutions are typically short, direct algorithms (loops, basic "
+            "string/list operations); avoid over-engineering or unnecessary "
+            "abstractions.",
+        ],
+    },
+}
+_FALLBACK_SECTIONS: dict[str, Any] = {
+    "when_to_use": "",
+    "procedure": ["Return only complete Python code. Prefer compact, direct solutions."],
+}
+
+
+def _render_sections(
+    signature: str,
+    when_to_use: str,
+    procedure: list[str],
+    pitfalls: list[str],
+    patterns: list[str],
+    max_chars: int = 3000,
+) -> str:
+    """Render a skill like a real runbook: distinct, independently scannable
+    sections instead of one paragraph the model has to parse unstructured."""
+    parts = [f"# Skill: {signature}"]
+    if when_to_use:
+        parts.append(f"## When to use\n{when_to_use}")
+    if procedure:
+        steps = "\n".join(f"{i}. {step}" for i, step in enumerate(procedure, 1))
+        parts.append(f"## Procedure\n{steps}")
+    if pitfalls:
+        bullets = "\n".join(f"- {p}" for p in pitfalls)
+        parts.append(f"## Common pitfalls\n{bullets}")
+    if patterns:
+        bullets = "\n".join(f"- {p}" for p in patterns)
+        parts.append(f"## Recurring patterns\n{bullets}")
+
+    # Truncate at whole-section boundaries rather than mid-sentence.
+    kept: list[str] = []
+    budget = max_chars
+    for part in parts:
+        cost = len(part) + (2 if kept else 0)  # "\n\n" join separator
+        if cost > budget:
+            break
+        kept.append(part)
+        budget -= cost
+    return "\n\n".join(kept)
 
 
 def _select_examples(exemplars: list[dict[str, Any]], k: int | None = None) -> list[dict[str, str]]:
@@ -58,48 +128,45 @@ def _render_examples(examples: list[dict[str, str]]) -> str:
     return "\n\n".join(parts)
 
 
-def _heuristic_procedure(signature: str, exemplars: list[dict[str, Any]], max_chars: int = 800) -> str:
-    snippets: list[str] = []
-    calls: list[str] = []
-    for ex in exemplars:
-        completion = str(ex.get("completion") or "")
-        for block in _CODE_BLOCK.findall(completion):
-            block = block.strip()
-            if block and block not in snippets:
-                snippets.append(block)
-        for call in _CALL.findall(completion):
-            if call not in _SKIP_CALLS and call not in calls:
-                calls.append(call)
-
-    lines = [
-        f"# Procedure for `{signature}`",
-        f"# distilled from {len(exemplars)} successful solution(s)",
-        "",
-        "Return only complete Python code. Prefer compact, direct solutions.",
-    ]
-    if calls:
-        lines.extend(["", "Recurring helper/function patterns: " + ", ".join(calls[:12])])
-    if snippets and os.environ.get("SKILL_HEURISTIC_INCLUDE_SNIPPET", "0") == "1":
-        lines.extend(["", "Reusable solution shape:", "```python", snippets[0][:650], "```"])
-    elif os.environ.get("SKILL_HEURISTIC_INCLUDE_SNIPPET", "0") == "1":
-        sample = str(exemplars[0].get("completion") or "").strip() if exemplars else ""
-        if sample:
-            lines.extend(["", "Reference solution shape:", sample[:650]])
-    return "\n".join(lines)[:max_chars]
+def _parse_pitfalls_and_patterns(text: str) -> tuple[list[str], list[str]]:
+    pitfalls: list[str] = []
+    patterns: list[str] = []
+    bucket: list[str] | None = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        upper = stripped.upper()
+        if upper.startswith("PITFALLS"):
+            bucket = pitfalls
+            continue
+        if upper.startswith("PATTERNS"):
+            bucket = patterns
+            continue
+        if bucket is not None and stripped.startswith(("-", "*")):
+            item = stripped.lstrip("-*").strip()
+            if item:
+                bucket.append(item[:200])
+    return pitfalls[:4], patterns[:4]
 
 
 def make_llm_distiller(model: str, base_url: str, api_key: str, max_examples: int = 40):
-    """Return a bounded, incremental cheatsheet distiller.
+    """Return a bounded, incremental distiller of `pitfalls`/`patterns` sections.
 
-    It is deliberately optional: the heuristic is deterministic and keeps smoke
-    runs offline, while real runs can use a capable teacher to turn successful
-    traces into a short, reusable skill instead of copying raw programs.
+    It is deliberately optional and deliberately narrow: the `when_to_use`/
+    `procedure` sections are fixed, hand-written per dataset
+    (`_STATIC_SKILL_SECTIONS`) and never touched here -- only the
+    exemplar-grounded `pitfalls`/`patterns` sections are LLM-distilled, so a
+    bad distillation can't corrupt the always-present static scaffolding.
     """
     from openai import OpenAI
 
     client = OpenAI(api_key=api_key, base_url=base_url)
 
-    def distill(signature: str, exemplars: list[dict[str, Any]], previous: str = "") -> str:
+    def distill(
+        signature: str,
+        exemplars: list[dict[str, Any]],
+        previous_pitfalls: list[str],
+        previous_patterns: list[str],
+    ) -> tuple[list[str], list[str]]:
         examples = exemplars[-max(1, max_examples):]
         rendered = "\n\n".join(
             "Problem:\n```python\n" + str(item.get("prompt", ""))[:400]
@@ -107,27 +174,39 @@ def make_llm_distiller(model: str, base_url: str, api_key: str, max_examples: in
             for item in examples
         )
         prompt = (
-            "Write a compact coding cheatsheet for a small code model. Return at most "
-            "180 words: 2-4 transferable recipes with trigger conditions and at most "
-            "3 concrete gotchas. Do not include a full solution, task-specific names, "
-            "or generic advice.\n\n"
-            f"Skill: {signature}\n"
-            + (f"Previous cheatsheet (improve it):\n{previous[:1200]}\n\n" if previous else "")
-            + f"Successful traces:\n{rendered}"
+            f"From these successful solutions to a `{signature}` coding skill, extract "
+            "concrete, transferable lessons in exactly this format:\n\n"
+            "PITFALLS:\n- <a specific trap or gotcha for this task shape>\n"
+            "PATTERNS:\n- <a recurring algorithmic pattern worth reusing>\n\n"
+            "At most 4 pitfalls and 4 patterns. Be specific and transferable -- no "
+            "task-specific names, no generic advice, no full solutions.\n\n"
         )
+        if previous_pitfalls or previous_patterns:
+            prompt += (
+                "Previous pitfalls (keep the ones still useful, refine or replace others):\n"
+                + "\n".join(f"- {p}" for p in previous_pitfalls) + "\n"
+                "Previous patterns:\n" + "\n".join(f"- {p}" for p in previous_patterns) + "\n\n"
+            )
+        prompt += f"Successful traces:\n{rendered}"
         try:
             response = client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.2,
-                max_tokens=600,
+                # Reasoning-capable models (e.g. GPT-5.5) spend part of
+                # max_tokens on hidden reasoning tokens before any visible
+                # text -- 500 was enough for the visible answer alone but not
+                # for reasoning + answer, so real calls came back empty
+                # (finish_reason="length") with zero usable content.
+                max_tokens=3000,
             )
             text = (response.choices[0].message.content or "").strip()
-            if text:
-                return text[:1400]
-        except Exception:  # noqa: BLE001 - deterministic fallback keeps cycles alive
+            pitfalls, patterns = _parse_pitfalls_and_patterns(text)
+            if pitfalls or patterns:
+                return pitfalls, patterns
+        except Exception:  # noqa: BLE001 - keep previous sections rather than fabricate
             pass
-        return _heuristic_procedure(signature, exemplars)
+        return previous_pitfalls, previous_patterns
 
     return distill
 
@@ -140,6 +219,8 @@ class Skill:
         self.stats: defaultdict[str, list[int]] = defaultdict(lambda: [0, 0])
         self.history: list[dict[str, Any]] = []
         self.exemplars: list[dict[str, str]] = []
+        self.pitfalls: list[str] = []
+        self.patterns: list[str] = []
         self.procedure = ""
         self.procedure_source = ""
         self.examples: list[dict[str, str]] = []
@@ -167,12 +248,24 @@ class Skill:
     def distill(self, distiller=None) -> str:
         if not self.exemplars:
             return self.procedure
+        sections = _STATIC_SKILL_SECTIONS.get(self.signature, _FALLBACK_SECTIONS)
         if distiller is None:
-            self.procedure = _heuristic_procedure(self.signature, self.exemplars)
+            # No LLM configured: pitfalls/patterns stay whatever they already
+            # were (empty on a fresh skill) rather than being fabricated from
+            # exemplar statistics.
             self.procedure_source = "heuristic"
         else:
-            self.procedure = str(distiller(self.signature, self.exemplars, self.procedure))[:1400]
-            self.procedure_source = "llm"
+            try:
+                self.pitfalls, self.patterns = distiller(
+                    self.signature, self.exemplars, self.pitfalls, self.patterns,
+                )
+                self.procedure_source = "llm"
+            except Exception:  # noqa: BLE001 - static sections still render below
+                self.procedure_source = "heuristic"
+        self.procedure = _render_sections(
+            self.signature, sections["when_to_use"], sections["procedure"],
+            self.pitfalls, self.patterns,
+        )
         self.examples = _select_examples(self.exemplars)
         return self.procedure
 
@@ -184,12 +277,16 @@ class Skill:
         return successes / total >= min_rate
 
     def to_dict(self) -> dict[str, Any]:
+        # `procedure` is deliberately excluded: it's a deterministic rendering
+        # of (signature, pitfalls, patterns) via `_render_sections`, not a
+        # separate source of truth -- see SkillBook.save()/skill.md.
         return {
             "signature": self.signature,
             "stats": {key: list(value) for key, value in self.stats.items()},
             "history": self.history,
             "exemplars": self.exemplars,
-            "procedure": self.procedure,
+            "pitfalls": self.pitfalls,
+            "patterns": self.patterns,
             "procedure_source": self.procedure_source,
             "examples": self.examples,
         }
@@ -202,9 +299,15 @@ class Skill:
             skill.stats[str(key)] = list(value)
         skill.history = list(data.get("history", []))
         skill.exemplars = list(data.get("exemplars", []))
-        skill.procedure = str(data.get("procedure", ""))
+        skill.pitfalls = list(data.get("pitfalls", []))
+        skill.patterns = list(data.get("patterns", []))
         skill.procedure_source = str(data.get("procedure_source", ""))
         skill.examples = list(data.get("examples", []))
+        sections = _STATIC_SKILL_SECTIONS.get(skill.signature, _FALLBACK_SECTIONS)
+        skill.procedure = _render_sections(
+            skill.signature, sections["when_to_use"], sections["procedure"],
+            skill.pitfalls, skill.patterns,
+        )
         return skill
 
 
@@ -220,22 +323,23 @@ class SkillBook:
         return self.skills[signature]
 
     def update(self, prompt: str, model_id: str, success: bool, task_id: str = "",
-               completion: str = "") -> None:
-        skill = self.get_or_create(extract_signature(prompt))
+               completion: str = "", dataset: str = "") -> None:
+        skill = self.get_or_create(extract_signature(prompt, dataset))
         skill.update(model_id, success, task_id=task_id, completion=completion, prompt=prompt)
 
     def update_from_trace(self, trace: dict[str, Any], small_model: str = "small",
                           large_model: str = "large") -> None:
         prompt = str(trace.get("prompt") or "")
         task_id = str(trace.get("task_id") or "")
+        dataset = str(trace.get("dataset") or "")
         self.update(prompt, small_model, bool(trace.get("small_success")), task_id,
-                    str(trace.get("small_completion") or ""))
+                    str(trace.get("small_completion") or ""), dataset=dataset)
         if not trace.get("large_skipped", False):
             self.update(prompt, large_model, bool(trace.get("large_success")), task_id,
-                        str(trace.get("large_completion") or ""))
+                        str(trace.get("large_completion") or ""), dataset=dataset)
 
-    def get_procedure(self, prompt: str) -> str:
-        skill = self.skills.get(extract_signature(prompt))
+    def get_procedure(self, prompt: str, dataset: str = "") -> str:
+        skill = self.skills.get(extract_signature(prompt, dataset))
         if not skill:
             return ""
         examples = _render_examples(skill.examples) if os.environ.get("SKILL_INCLUDE_EXAMPLES", "0") == "1" else ""
@@ -251,12 +355,22 @@ class SkillBook:
         return count
 
     def save(self, path: str | Path) -> None:
-        out = Path(path)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps({"skills": [s.to_dict() for s in self.skills.values()]}, indent=2))
+        """Write `path` as a directory holding two files: `skill.md` (the real
+        skill -- exactly the text that gets injected into prompts) and
+        `skill_statistics.json` (stats/history/exemplars/pitfalls/patterns --
+        the source data skill.md is deterministically rendered from)."""
+        out_dir = Path(path)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        rendered = [skill.procedure for skill in self.skills.values() if skill.procedure]
+        (out_dir / "skill.md").write_text(
+            ("\n\n---\n\n".join(rendered) + "\n") if rendered else "",
+        )
+        (out_dir / "skill_statistics.json").write_text(
+            json.dumps({"skills": [s.to_dict() for s in self.skills.values()]}, indent=2),
+        )
 
     def load(self, path: str | Path) -> None:
-        src = Path(path)
+        src = Path(path) / "skill_statistics.json"
         if not src.exists():
             return
         data = json.loads(src.read_text())
