@@ -434,6 +434,31 @@ def _collect_one(
     }
 
 
+def _check_model_registered(client: OpenAI, model: str, role: str, base_url: str) -> None:
+    """Fail fast and loud instead of quietly recording hundreds of identical
+    404s as 'model failures' -- this exact failure mode (a reload leaving the
+    wrong model/adapter registered, or a stale/untracked server still bound
+    to the port) has silently corrupted full collection runs before."""
+    try:
+        registered = {m.id for m in client.models.list().data}
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"[collect] FATAL: could not reach {role} server at {base_url}: "
+            f"{type(exc).__name__}: {str(exc)[:200]}",
+            file=sys.stderr,
+        )
+        raise SystemExit(2) from exc
+    if model not in registered:
+        print(
+            f"[collect] FATAL: {role} model '{model}' is not registered at {base_url} "
+            f"(it currently serves: {sorted(registered)}). Every request would fail "
+            "identically instead of reflecting real model behavior -- refusing to "
+            "proceed. Check that the reload/serve step actually completed for this model.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data", type=Path, default=Path("data/raw/he_mbpp.jsonl"))
@@ -492,6 +517,10 @@ def main() -> int:
     small_client = OpenAI(api_key=args.api_key, base_url=args.small_base_url)
     large_client = OpenAI(api_key=args.api_key, base_url=args.large_base_url)
     force_both = not args.probe_only
+
+    if not mock:
+        _check_model_registered(small_client, args.small_model, "small", args.small_base_url)
+        _check_model_registered(large_client, args.large_model, "large", args.large_base_url)
 
     print(
         f"[collect] tasks={len(tasks)} split={args.split} force_both={force_both} "

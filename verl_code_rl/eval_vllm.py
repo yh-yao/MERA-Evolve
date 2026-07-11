@@ -103,6 +103,9 @@ def main() -> int:
 
     tasks = _filter_tasks(load_jsonl(args.data), args.split, args.dataset, args.limit)
     client = OpenAI(api_key=args.api_key, base_url=args.base_url)
+    from verl_code_rl.collect_traces import _check_model_registered
+
+    _check_model_registered(client, args.model, "eval", args.base_url)
     skillbook = None
     if args.skillbook:
         skillbook = SkillBook()
