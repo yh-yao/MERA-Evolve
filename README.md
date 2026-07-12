@@ -341,7 +341,7 @@ PORT=8000 scripts/stop_vllm.sh
 Prepare data first, then:
 
 ```bash
-source configs/humaneval_mbpp/grpo_qwen25_1p5b.env
+source experiments/humaneval_mbpp/grpo_qwen25_1p5b.env
 scripts/train_grpo.sh
 ```
 
@@ -349,7 +349,7 @@ Useful smoke settings:
 
 ```bash
 scripts/prepare_data.sh --max-train 16 --max-val 16
-source configs/humaneval_mbpp/grpo_qwen25_1p5b.env
+source experiments/humaneval_mbpp/grpo_qwen25_1p5b.env
 TRAIN_BATCH_SIZE=8 \
 VAL_BATCH_SIZE=8 \
 PPO_MINI_BATCH_SIZE=4 \

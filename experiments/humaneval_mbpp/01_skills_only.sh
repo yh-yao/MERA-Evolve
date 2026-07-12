@@ -11,7 +11,7 @@ set -euo pipefail
 #
 # Usage: bash experiments/01_skills_only.sh
 
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 PYTHON="${PYTHON:-python}"
 DATA="${DATA:-data/raw/he_mbpp.jsonl}"

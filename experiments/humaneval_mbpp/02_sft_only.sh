@@ -16,7 +16,7 @@ set -euo pipefail
 #
 # Usage: bash experiments/02_sft_only.sh
 
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 PYTHON="${PYTHON:-python}"
 DATA="${DATA:-data/raw/he_mbpp.jsonl}"

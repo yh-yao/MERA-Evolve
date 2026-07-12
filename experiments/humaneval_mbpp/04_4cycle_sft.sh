@@ -16,7 +16,7 @@ set -euo pipefail
 #
 # Usage: bash experiments/04_4cycle_sft.sh
 
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 DATA="${DATA:-data/raw/he_mbpp.jsonl}"
 SMALL_MODEL="${SMALL_MODEL:-Qwen/Qwen2.5-Coder-1.5B-Instruct}"

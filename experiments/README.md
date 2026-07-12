@@ -1,6 +1,18 @@
 # Reproducible experiment scripts
 
-Each script here isolates one piece of the evolve loop so results are
+One subdirectory per task domain, so domain-specific tuning (learning rate,
+batch sizes, eager-mode requirements, etc.) never gets silently mixed up
+across domains. Each domain's config values live directly in its scripts'
+env-var defaults -- there is no separate `configs/` directory.
+
+- `humaneval_mbpp/` — HumanEval + MBPP code generation
+  (`data/raw/he_mbpp.jsonl`), the domain documented in `CLAUDE.md` and
+  `docs/experiments/`.
+- `tau-2/` — reserved for τ²-bench, not yet populated.
+
+## humaneval_mbpp/
+
+Each script isolates one piece of the evolve loop so results are
 reproducible independently of each other. All of them assume small + large
 OpenAI-compatible vLLM servers are already running (`scripts/serve_vllm.sh`)
 and that `.env` has `COMMONSTACK_API_KEY` set if `DISTILLER_MODEL` is used.
@@ -14,7 +26,14 @@ Write-ups of past runs of these scripts live in `docs/experiments/`.
 | `04_4cycle_sft.sh` | Skills+SFT compounding over cycles | SFT (LoRA), 4 cycles | yes |
 | `05_4cycle_sft_grpo.sh` | Skills+SFT+GRPO compounding over cycles | SFT+GRPO (LoRA), 4 cycles | yes |
 
-## Quick start
+`grpo_qwen25_1p5b.env` / `sft_qwen25_1p5b.env` in that same directory pin the
+standalone-training entry points' (`scripts/train_grpo.sh` /
+`scripts/train_sft.sh`) settings for this domain, for use outside these
+experiment scripts (see `CLAUDE.md`'s "Standalone GRPO training" section).
+The experiment scripts below don't source them -- the same values are baked
+in directly as their own env-var defaults.
+
+### Quick start
 
 ```bash
 # Start the small/large model servers first (adjust GPU/port to taste)
@@ -23,20 +42,20 @@ MODEL_PATH=Qwen/Qwen2.5-Coder-3B-Instruct  PORT=8001 GPU=1 scripts/serve_vllm.sh
 
 # Single-mechanism isolations (01-03) each need one more free GPU for training
 # (02/03 only; 01 does no training at all)
-bash experiments/01_skills_only.sh
-SFT_GPU=2 bash experiments/02_sft_only.sh
-TRAIN_GPU=2 bash experiments/03_grpo_only.sh
+bash experiments/humaneval_mbpp/01_skills_only.sh
+SFT_GPU=2 bash experiments/humaneval_mbpp/02_sft_only.sh
+TRAIN_GPU=2 bash experiments/humaneval_mbpp/03_grpo_only.sh
 
 # Full closed loops (04-05) need one more free GPU for training, plus a
 # second small-model GPU for SMALL_RELOAD_CMD to reload onto after each
 # cycle's training step (SMALL_RELOAD_GPU) -- see each script's header.
-SFT_GPU=2 SMALL_RELOAD_GPU=0 bash experiments/04_4cycle_sft.sh
-GRPO_GPU=2 SMALL_RELOAD_GPU=0 bash experiments/05_4cycle_sft_grpo.sh
+SFT_GPU=2 SMALL_RELOAD_GPU=0 bash experiments/humaneval_mbpp/04_4cycle_sft.sh
+GRPO_GPU=2 SMALL_RELOAD_GPU=0 bash experiments/humaneval_mbpp/05_4cycle_sft_grpo.sh
 ```
 
 Every env var each script reads has a documented default in its header;
 override any of them inline, e.g. `TRAIN_LIMIT=64 EVAL_LIMIT=100
-bash experiments/03_grpo_only.sh` for a fast smoke run.
+bash experiments/humaneval_mbpp/03_grpo_only.sh` for a fast smoke run.
 
 ## Why these specific defaults
 
