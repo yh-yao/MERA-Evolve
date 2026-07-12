@@ -32,6 +32,13 @@ TEST_FREQ="${TEST_FREQ:-10}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.5}"
 OUTPUT_DIR="${OUTPUT_DIR:-}"
 
+# This node's local CUDA toolchain reproduces `torch.AcceleratorError: CUDA
+# error: unspecified/illegal memory access` under vLLM CUDA graphs once a
+# rollout engine has been running for a while (see serve_vllm.sh's identical
+# gotcha for the standalone server) -- keep verl's internal rollout engine in
+# eager mode too, unless a fixed vLLM version is available later.
+ENFORCE_EAGER="${ENFORCE_EAGER:-True}"
+
 # LoRA is the default training mode, matching router-skills-evolve's HumanEval
 # GRPO algorithm (frozen base + trained adapter, r=16). Set LORA_RANK=0 to fall
 # back to full-parameter fine-tuning.
@@ -96,6 +103,7 @@ set -x
   actor_rollout_ref.rollout.top_k=-1 \
   actor_rollout_ref.rollout.tensor_model_parallel_size="$ROLLOUT_TP" \
   actor_rollout_ref.rollout.gpu_memory_utilization="$GPU_MEMORY_UTILIZATION" \
+  actor_rollout_ref.rollout.enforce_eager="$ENFORCE_EAGER" \
   actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu="$LOG_PROB_MICRO_BATCH_SIZE_PER_GPU" \
   actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu="$LOG_PROB_MICRO_BATCH_SIZE_PER_GPU" \
   trainer.project_name="$PROJECT_NAME" \
