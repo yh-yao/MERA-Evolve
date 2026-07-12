@@ -66,7 +66,7 @@ PORT=8000 scripts/stop_vllm.sh
 Standalone GRPO training (after `prepare_data.sh`):
 
 ```bash
-source configs/grpo_qwen25_1p5b.env
+source configs/humaneval_mbpp/grpo_qwen25_1p5b.env
 scripts/train_grpo.sh                        # wraps `python -m verl.trainer.main_ppo`
 scripts/train_grpo.sh trainer.total_training_steps=2   # extra verl overrides pass through as argv
 ```
