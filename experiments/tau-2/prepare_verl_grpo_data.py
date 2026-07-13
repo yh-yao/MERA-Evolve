@@ -26,7 +26,7 @@ def main() -> None:
     ap.add_argument("--output", type=Path, required=True)
     ap.add_argument("--user-base-url", default="http://127.0.0.1:8211/v1")
     ap.add_argument("--seed", type=int, default=300)
-    ap.add_argument("--max-steps", type=int, default=15)
+    ap.add_argument("--max-steps", type=int, default=12)
     ap.add_argument(
         "--balance-domains", action=argparse.BooleanOptionalAction, default=True,
         help="Repeat minority-domain tasks so each domain has equal sampling weight.",
