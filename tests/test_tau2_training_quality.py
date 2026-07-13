@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import inspect
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,6 +10,7 @@ TAU2_EXPERIMENT = Path(__file__).parents[1] / "experiments" / "tau-2"
 sys.path.insert(0, str(TAU2_EXPERIMENT))
 
 import lib_tau2  # noqa: E402
+from tau2_verl_interaction import Tau2Interaction  # noqa: E402
 
 
 def test_action_completion_accepts_shorter_valid_read_path() -> None:
@@ -70,3 +72,8 @@ def test_trace_with_explicitly_empty_action_requirements_is_complete() -> None:
     assert lib_tau2.trace_action_complete(
         {"expected_tool_calls": [], "observed_tool_calls": []}
     )
+
+
+def test_verl_state_evaluator_is_an_instance_method() -> None:
+    parameters = list(inspect.signature(Tau2Interaction._evaluate_state).parameters)
+    assert parameters[0] == "self"

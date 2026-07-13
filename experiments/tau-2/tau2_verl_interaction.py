@@ -149,8 +149,7 @@ class Tau2Interaction(BaseInteraction):
                 orch._cleanup()
         return orch.done, response, reward, {"tau2_reward": reward, "observation_role": observation_role}
 
-    @staticmethod
-    def _evaluate_state(state, evaluation_type_for=None, communication_mode=None) -> float:
+    def _evaluate_state(self, state, evaluation_type_for=None, communication_mode=None) -> float:
         if state["finalized"]:
             return float(state["score"])
         if evaluation_type_for is None or communication_mode is None:
