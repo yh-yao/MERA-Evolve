@@ -8,13 +8,14 @@ MODEL_PATH="${MODEL_PATH:-Qwen/Qwen2.5-1.5B-Instruct}"
 LORA_ADAPTER_PATH="${LORA_ADAPTER_PATH:-}"
 N_GPUS="${N_GPUS:-1}"
 TOTAL_STEPS="${TOTAL_STEPS:-10}"
-TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-16}"
+TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-8}"
 N_GENERATIONS="${N_GENERATIONS:-4}"
 PPO_MICRO_BATCH_SIZE="${PPO_MICRO_BATCH_SIZE:-2}"
 MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-8192}"
 MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-8192}"
-AGENT_LOOP_WORKERS="${AGENT_LOOP_WORKERS:-8}"
+AGENT_LOOP_WORKERS="${AGENT_LOOP_WORKERS:-16}"
 REWARD_WORKERS="${REWARD_WORKERS:-1}"
+MAX_TURNS="${MAX_TURNS:-20}"
 MAX_MODEL_LENGTH="$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH))"
 
 cd "$ROOT"
@@ -58,8 +59,8 @@ python -m verl.trainer.main_ppo \
   actor_rollout_ref.rollout.enforce_eager=True \
   actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu="$PPO_MICRO_BATCH_SIZE" \
   actor_rollout_ref.rollout.multi_turn.enable=True \
-  actor_rollout_ref.rollout.multi_turn.max_user_turns=40 \
-  actor_rollout_ref.rollout.multi_turn.max_assistant_turns=40 \
+  actor_rollout_ref.rollout.multi_turn.max_user_turns="$MAX_TURNS" \
+  actor_rollout_ref.rollout.multi_turn.max_assistant_turns="$MAX_TURNS" \
   actor_rollout_ref.rollout.multi_turn.interaction_config_path="$ROOT/experiments/tau-2/tau2_interaction.yaml" \
   actor_rollout_ref.rollout.agent.agent_loop_config_path="$ROOT/experiments/tau-2/tau2_agent_loop.yaml" \
   actor_rollout_ref.rollout.agent.num_workers="$AGENT_LOOP_WORKERS" \

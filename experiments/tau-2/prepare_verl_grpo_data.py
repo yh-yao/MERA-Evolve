@@ -25,6 +25,7 @@ def main() -> None:
     ap.add_argument("--output", type=Path, required=True)
     ap.add_argument("--user-base-url", default="http://127.0.0.1:8211/v1")
     ap.add_argument("--seed", type=int, default=300)
+    ap.add_argument("--max-steps", type=int, default=20)
     args = ap.parse_args()
     skills = json.loads(args.skillbook.read_text())
     user_spec = lib_tau2.make_llm_spec("openai/evol-llm-user", args.user_base_url)
@@ -60,7 +61,7 @@ def main() -> None:
                 "split": "train", "index": index,
                 "interaction_kwargs": {
                     "name": "tau2", "domain": trace["domain"], "task_id": str(trace["task_id"]),
-                    "seed": args.seed, "max_steps": 40,
+                    "seed": args.seed, "max_steps": args.max_steps,
                     "user_model": "openai/evol-llm-user", "user_base_url": args.user_base_url,
                     "skill_text": skills.get(domain, ""),
                     "expected_initial_user": initial_user,
