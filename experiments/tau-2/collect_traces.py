@@ -110,7 +110,7 @@ def main() -> int:
             skill_text=skill_text,
         )
         main_row["fallback_used"] = False
-        if (main_row["passed"] and main_row.get("action_complete", False)) or not args.probe_only:
+        if (main_row["passed"] and lib_tau2.trace_action_complete(main_row)) or not args.probe_only:
             return main_row
 
         fallback_rows = []
@@ -122,14 +122,14 @@ def main() -> int:
             )
             fallback_row["fallback_attempt"] = attempt
             fallback_rows.append(fallback_row)
-            if fallback_row.get("passed") and fallback_row.get("action_complete", False):
+            if fallback_row.get("passed") and lib_tau2.trace_action_complete(fallback_row):
                 break
         fallback_row = max(
             fallback_rows,
             key=lambda row: (
-                bool(row.get("passed") and row.get("action_complete", False)),
+                bool(row.get("passed") and lib_tau2.trace_action_complete(row)),
                 bool(row.get("passed")),
-                bool(row.get("action_complete", False)),
+                lib_tau2.trace_action_complete(row),
                 float(row.get("reward", 0.0)),
                 float(row.get("action_recall", 0.0)),
             ),
@@ -157,7 +157,7 @@ def main() -> int:
                 fallback_rescued += int(
                     row.get("fallback_used", False)
                     and row.get("passed", False)
-                    and row.get("action_complete", False)
+                    and lib_tau2.trace_action_complete(row)
                 )
                 out.write(json.dumps(row, ensure_ascii=False) + "\n")
                 out.flush()

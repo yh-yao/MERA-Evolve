@@ -11,7 +11,7 @@ sys.path.insert(0, str(TAU2_EXPERIMENT))
 import lib_tau2  # noqa: E402
 
 
-def test_action_completion_requires_repeated_golden_calls() -> None:
+def test_action_completion_accepts_shorter_valid_read_path() -> None:
     task = {
         "evaluation_criteria": {
             "actions": [
@@ -27,7 +27,21 @@ def test_action_completion_requires_repeated_golden_calls() -> None:
 
     _, _, recall, complete = lib_tau2.action_completion(task, messages)
 
-    assert recall == 2 / 3
+    assert recall == 1.0
+    assert complete is True
+
+
+def test_action_completion_rejects_missing_action_type() -> None:
+    task = {
+        "evaluation_criteria": {
+            "actions": [{"name": "lookup"}, {"name": "update"}]
+        }
+    }
+    messages = [{"tool_calls": [{"name": "lookup"}]}]
+
+    _, _, recall, complete = lib_tau2.action_completion(task, messages)
+
+    assert recall == 0.5
     assert complete is False
 
 
@@ -50,3 +64,9 @@ def test_action_completion_accepts_tau2_style_message_objects() -> None:
     assert observed == expected
     assert recall == 1.0
     assert complete is True
+
+
+def test_trace_with_explicitly_empty_action_requirements_is_complete() -> None:
+    assert lib_tau2.trace_action_complete(
+        {"expected_tool_calls": [], "observed_tool_calls": []}
+    )

@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import json
 import sys
-from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -43,7 +42,7 @@ DOMAINS = ["airline", "retail", "telecom"]
 
 
 def expected_tool_call_names(task: Any) -> list[str]:
-    """Return the benchmark's required action names, including repetitions."""
+    """Return the benchmark's golden action names, including repetitions."""
     criteria = task.evaluation_criteria if hasattr(task, "evaluation_criteria") else task["evaluation_criteria"]
     actions = criteria.actions if hasattr(criteria, "actions") else criteria.get("actions")
     return [a.name if hasattr(a, "name") else a["name"] for a in (actions or [])]
@@ -68,8 +67,31 @@ def observed_tool_call_names(messages: list[Any]) -> list[str]:
     return names
 
 
+def action_name_coverage(expected: list[str], observed: list[str]) -> tuple[float, bool]:
+    """Measure coverage of semantically required action types.
+
+    Golden trajectories may repeat read calls because of one valid execution
+    path. Requiring the exact repetition count rejects shorter valid paths;
+    final argument/state correctness remains enforced by the official reward.
+    """
+    required = set(expected)
+    if not required:
+        return 1.0, True
+    actual = set(observed)
+    matched = len(required & actual)
+    return matched / len(required), matched == len(required)
+
+
+def trace_action_complete(row: dict[str, Any]) -> bool:
+    if "expected_tool_calls" not in row:
+        return bool(row.get("action_complete", False))
+    expected = [str(name) for name in row.get("expected_tool_calls", [])]
+    observed = [str(name) for name in row.get("observed_tool_calls", [])]
+    return action_name_coverage(expected, observed)[1]
+
+
 def action_completion(task: Any, messages: list[Any]) -> tuple[list[str], list[str], float, bool]:
-    """Measure multiset recall against tau2's golden action sequence.
+    """Measure required action-type coverage against tau2's golden actions.
 
     The official DB evaluator cannot distinguish omitted read-only or transfer
     calls when they leave the final database unchanged. This signal prevents
@@ -77,13 +99,8 @@ def action_completion(task: Any, messages: list[Any]) -> tuple[list[str], list[s
     """
     expected = expected_tool_call_names(task)
     observed = observed_tool_call_names(messages)
-    if not expected:
-        return expected, observed, 1.0, True
-    required = Counter(expected)
-    actual = Counter(observed)
-    matched = sum(min(count, actual[name]) for name, count in required.items())
-    recall = matched / len(expected)
-    return expected, observed, recall, matched == len(expected)
+    recall, complete = action_name_coverage(expected, observed)
+    return expected, observed, recall, complete
 
 
 def load_partition() -> dict[str, list[dict[str, str]]]:

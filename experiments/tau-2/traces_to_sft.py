@@ -31,6 +31,8 @@ from pathlib import Path
 
 import pandas as pd
 
+import lib_tau2
+
 TOOLS_BLOCK_TEMPLATE = (
     "\n\n# Tools\n\nYou may call one or more functions to assist with the user "
     "query.\n\nYou are provided with function signatures within <tools></tools> "
@@ -105,7 +107,7 @@ def main() -> int:
         n_total += 1
         if not row.get("passed"):
             continue
-        if not row.get("action_complete", False):
+        if not lib_tau2.trace_action_complete(row):
             n_incomplete += 1
             continue
         system_content = row["system_prompt"] + _render_tools_block(row.get("tools", []))
