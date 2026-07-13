@@ -119,9 +119,15 @@ class Tau2Interaction(BaseInteraction):
         except Exception as exc:
             orch.done = True
             orch.termination_reason = TerminationReason.AGENT_ERROR
+            state["score"] = 0.0
+            state["finalized"] = True
             orch._cleanup()
-            self._instances.pop(instance_id, None)
-            raise RuntimeError(f"tau2 interaction failed for {instance_id}") from exc
+            print(f"[tau2-verl] interaction failed for {instance_id}: {exc}", file=sys.stderr)
+            return True, "", 0.0, {
+                "tau2_reward": 0.0,
+                "observation_role": "user",
+                "interaction_error": str(exc),
+            }
 
         observation = orch.message
         if isinstance(observation, ToolMessage):

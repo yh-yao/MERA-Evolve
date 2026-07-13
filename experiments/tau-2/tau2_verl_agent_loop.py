@@ -25,15 +25,16 @@ class Tau2AgentLoop(ToolAgentLoop):
         )
         agent_data.user_turns += 1
         role = extra.get("observation_role", "user")
-        add_messages = [{"role": role, "content": response}]
-        agent_data.messages.extend(add_messages)
         if reward is not None:
             agent_data.turn_scores.append(reward)
-        response_ids = await self.apply_chat_template(add_messages, remove_system_prompt=True)
-        agent_data.prompt_ids += response_ids
-        agent_data.response_mask += [0] * len(response_ids)
-        if agent_data.response_logprobs:
-            agent_data.response_logprobs += [0.0] * len(response_ids)
+        if response:
+            add_messages = [{"role": role, "content": response}]
+            agent_data.messages.extend(add_messages)
+            response_ids = await self.apply_chat_template(add_messages, remove_system_prompt=True)
+            agent_data.prompt_ids += response_ids
+            agent_data.response_mask += [0] * len(response_ids)
+            if agent_data.response_logprobs:
+                agent_data.response_logprobs += [0.0] * len(response_ids)
         if terminate:
             await agent_data.interaction.finalize_interaction(agent_data.request_id)
             return AgentState.TERMINATED
