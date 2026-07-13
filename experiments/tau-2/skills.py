@@ -54,11 +54,21 @@ _STATIC_SECTIONS: dict[str, dict[str, str]] = {
             "bill payment, line suspension, or plan changes."
         ),
         "procedure": (
-            "1. Authenticate/identify the user's line before taking account actions.\n"
-            "2. Confirm the exact action before calling a mutating tool.\n"
-            "3. Only call one tool at a time; never call a tool and message the user in the "
-            "same turn.\n"
-            "4. Only act on what the policy and available tools support -- no invented "
+            "1. Identify the customer and affected line, then verify that the line is active "
+            "before device troubleshooting.\n"
+            "2. For mobile-data issues, ask the user to run the policy's device diagnostics "
+            "and follow the matching branch: turn mobile data on when disabled; when abroad, "
+            "enable roaming on the line if needed and ask the user to turn device roaming on; "
+            "turn Data Saver off; disconnect a problematic VPN; change a 2G/3G preference to "
+            "4G/5G; or offer data refueling when the plan limit is exhausted.\n"
+            "3. Device diagnostics and fixes (for example check_network_status, toggle_data, "
+            "toggle_roaming, toggle_data_saver_mode, disconnect_vpn, and "
+            "set_network_mode_preference) are actions the USER performs after your clear "
+            "instruction. Do not emit them as agent-side tool calls or invent similarly named "
+            "agent tools.\n"
+            "4. Confirm account mutations before calling one available agent tool at a time; "
+            "never call a tool and message the user in the same turn.\n"
+            "5. Only act on what the policy and available tools support -- no invented "
             "procedures or subjective recommendations."
         ),
     },

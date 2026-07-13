@@ -13,6 +13,7 @@ sys.path.insert(0, str(TAU2_EXPERIMENT))
 
 import lib_tau2  # noqa: E402
 import traces_to_sft  # noqa: E402
+from skills import SkillBook  # noqa: E402
 from tau2_verl_interaction import Tau2Interaction  # noqa: E402
 
 
@@ -127,3 +128,17 @@ def test_sft_domain_balancing_is_deterministic() -> None:
         "retail": 2,
         "telecom": 2,
     }
+
+
+def test_telecom_skill_covers_policy_mobile_data_branches() -> None:
+    rendered = SkillBook().skills["telecom"].render()
+
+    for action in (
+        "toggle_data",
+        "toggle_roaming",
+        "toggle_data_saver_mode",
+        "disconnect_vpn",
+        "set_network_mode_preference",
+    ):
+        assert action in rendered
+    assert "actions the USER performs" in rendered
