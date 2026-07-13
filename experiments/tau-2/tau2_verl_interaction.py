@@ -135,10 +135,11 @@ class Tau2Interaction(BaseInteraction):
         if orch.done:
             try:
                 reward = self._evaluate_state(state, _evaluation_type_for, _communication_mode)
-            except Exception:
+            except Exception as exc:
+                print(f"[tau2-verl] evaluation failed for {instance_id}: {exc}", file=sys.stderr)
+                state["score"] = 0.0
+                state["finalized"] = True
                 orch._cleanup()
-                self._instances.pop(instance_id, None)
-                raise
         return orch.done, response, reward, {"tau2_reward": reward, "observation_role": observation_role}
 
     @staticmethod
@@ -171,10 +172,12 @@ class Tau2Interaction(BaseInteraction):
             orch.termination_reason = TerminationReason.MAX_STEPS
         try:
             return self._evaluate_state(state)
-        except Exception:
+        except Exception as exc:
+            print(f"[tau2-verl] evaluation failed for {instance_id}: {exc}", file=sys.stderr)
+            state["score"] = 0.0
+            state["finalized"] = True
             orch._cleanup()
-            self._instances.pop(instance_id, None)
-            raise
+            return 0.0
 
     async def calculate_score(self, instance_id: str, **_: Any) -> float:
         return float(self._instances[instance_id]["score"])

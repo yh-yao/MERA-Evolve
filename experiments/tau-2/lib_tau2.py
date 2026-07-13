@@ -102,6 +102,7 @@ def prime_nl_judge_routing(user_spec) -> None:
     args = {
         **dict(user_spec.args),
         "temperature": tau2_config.DEFAULT_LLM_NL_ASSERTIONS_TEMPERATURE,
+        "response_format": {"type": "json_object"},
     }
     tau2_config.DEFAULT_LLM_NL_ASSERTIONS = model
     tau2_config.DEFAULT_LLM_NL_ASSERTIONS_ARGS = args
