@@ -97,12 +97,16 @@ def main() -> int:
 
     rows_out = []
     n_total = 0
+    n_incomplete = 0
     for line in args.traces.read_text().splitlines():
         if not line.strip():
             continue
         row = json.loads(line)
         n_total += 1
         if not row.get("passed"):
+            continue
+        if not row.get("action_complete", False):
+            n_incomplete += 1
             continue
         system_content = row["system_prompt"] + _render_tools_block(row.get("tools", []))
         messages = [{"role": "system", "content": system_content}]
@@ -127,7 +131,8 @@ def main() -> int:
     n_fallback = sum(r["fallback_used"] for r in rows_out)
     print(
         f"[traces_to_sft] {len(rows_out)}/{n_total} trajectories passed -> SFT rows "
-        f"({len(rows_out) - n_fallback} main-success, {n_fallback} fallback-rescued/teacher)"
+        f"({len(rows_out) - n_fallback} main-success, {n_fallback} fallback-rescued/teacher; "
+        f"excluded {n_incomplete} passed but action-incomplete)"
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(rows_out).to_parquet(args.output)

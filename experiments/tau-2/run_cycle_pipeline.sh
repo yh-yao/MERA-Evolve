@@ -38,6 +38,10 @@ BASE_MODEL="Qwen/Qwen2.5-1.5B-Instruct"
 USER_MODEL_PATH="Qwen/Qwen2.5-3B-Instruct"
 DISTILLER_MODEL="openai/gpt-5.5"
 DISTILLER_BASE_URL="https://api.commonstack.ai/v1"
+TEACHER_MODEL="${TEACHER_MODEL:-openai/openai/gpt-5.5}"
+TEACHER_BASE_URL="${TEACHER_BASE_URL:-https://api.commonstack.ai/v1}"
+TEACHER_ATTEMPTS="${TEACHER_ATTEMPTS:-2}"
+COLLECT_MAX_STEPS="${COLLECT_MAX_STEPS:-40}"
 
 mkdir -p "$RESULTS_DIR"
 LOG="$RESULTS_DIR/pipeline.log"
@@ -162,9 +166,12 @@ for ((cycle=START_CYCLE; cycle<N_CYCLES; cycle++)); do
   [[ -n "$PREV_SKILLBOOK" ]] && SKILL_ARG=(--skillbook "$PREV_SKILLBOOK")
   log "collecting TRAIN traces (skillbook=${PREV_SKILLBOOK:-none})"
   "$TAU2_PY" collect_traces.py \
-    --bucket TRAIN --workers 6 --max-steps 60 --probe-only \
+    --bucket TRAIN --workers 6 --max-steps "$COLLECT_MAX_STEPS" --probe-only \
     --agent-model "openai/evol-llm-agent" --agent-base-url "$AGENT_BASE_URL" \
     --user-model "openai/evol-llm-user" --user-base-url "$USER_BASE_URL" \
+    --fallback-agent-model "$TEACHER_MODEL" \
+    --fallback-agent-base-url "$TEACHER_BASE_URL" \
+    --fallback-attempts "$TEACHER_ATTEMPTS" \
     "${SKILL_ARG[@]}" \
     --out "$OUT/train_traces.jsonl" >> "$LOG" 2>&1
 

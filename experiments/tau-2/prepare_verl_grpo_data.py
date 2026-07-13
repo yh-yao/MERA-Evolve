@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections import Counter
 from pathlib import Path
 
 import datasets
@@ -26,6 +27,10 @@ def main() -> None:
     ap.add_argument("--user-base-url", default="http://127.0.0.1:8211/v1")
     ap.add_argument("--seed", type=int, default=300)
     ap.add_argument("--max-steps", type=int, default=20)
+    ap.add_argument(
+        "--balance-domains", action=argparse.BooleanOptionalAction, default=True,
+        help="Repeat minority-domain tasks so each domain has equal sampling weight.",
+    )
     args = ap.parse_args()
     skills = json.loads(args.skillbook.read_text())
     user_spec = lib_tau2.make_llm_spec("openai/evol-llm-user", args.user_base_url)
@@ -68,11 +73,20 @@ def main() -> None:
                 },
             },
         })
+    raw_counts = Counter(row["ability"] for row in rows)
+    if args.balance_domains and raw_counts:
+        target = max(raw_counts.values())
+        balanced = []
+        for domain in sorted(raw_counts):
+            domain_rows = [row for row in rows if row["ability"] == domain]
+            balanced.extend(domain_rows[i % len(domain_rows)] for i in range(target))
+        rows = balanced
     args.output.parent.mkdir(parents=True, exist_ok=True)
     datasets.Dataset.from_list(rows).to_parquet(str(args.output))
     print(
         f"[prepare_verl_grpo_data] wrote {len(rows)} rows to {args.output} "
-        f"(skipped {skipped} traces without messages)"
+        f"(source domains={dict(sorted(raw_counts.items()))}, balanced={args.balance_domains}; "
+        f"skipped {skipped} traces without messages)"
     )
 
 

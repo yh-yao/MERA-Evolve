@@ -108,7 +108,7 @@ class SkillBook:
         }
 
     def add_exemplar(self, domain: str, trace_row: dict) -> None:
-        if trace_row.get("passed"):
+        if trace_row.get("passed") and trace_row.get("action_complete", False):
             self.skills[domain].exemplars.append(trace_row)
 
     def distill_all(self, distiller=None) -> None:

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +40,50 @@ if str(TAU2_SITE_PACKAGES) not in sys.path:
     sys.path.append(str(TAU2_SITE_PACKAGES))
 
 DOMAINS = ["airline", "retail", "telecom"]
+
+
+def expected_tool_call_names(task: Any) -> list[str]:
+    """Return the benchmark's required action names, including repetitions."""
+    criteria = task.evaluation_criteria if hasattr(task, "evaluation_criteria") else task["evaluation_criteria"]
+    actions = criteria.actions if hasattr(criteria, "actions") else criteria.get("actions")
+    return [a.name if hasattr(a, "name") else a["name"] for a in (actions or [])]
+
+
+def observed_tool_call_names(messages: list[Any]) -> list[str]:
+    names: list[str] = []
+    for message in messages:
+        tool_calls = (
+            message.get("tool_calls")
+            if isinstance(message, dict)
+            else getattr(message, "tool_calls", None)
+        )
+        for call in tool_calls or []:
+            if hasattr(call, "name"):
+                name = call.name
+            else:
+                function = call.get("function") or {}
+                name = call.get("name") or function.get("name")
+            if name:
+                names.append(str(name))
+    return names
+
+
+def action_completion(task: Any, messages: list[Any]) -> tuple[list[str], list[str], float, bool]:
+    """Measure multiset recall against tau2's golden action sequence.
+
+    The official DB evaluator cannot distinguish omitted read-only or transfer
+    calls when they leave the final database unchanged. This signal prevents
+    such no-op conversations from being treated as expert demonstrations.
+    """
+    expected = expected_tool_call_names(task)
+    observed = observed_tool_call_names(messages)
+    if not expected:
+        return expected, observed, 1.0, True
+    required = Counter(expected)
+    actual = Counter(observed)
+    matched = sum(min(count, actual[name]) for name, count in required.items())
+    recall = matched / len(expected)
+    return expected, observed, recall, matched == len(expected)
 
 
 def load_partition() -> dict[str, list[dict[str, str]]]:
@@ -255,6 +300,9 @@ def run_task(
     messages = []
     for m in (sim.messages or []):
         messages.append(m.model_dump(mode="json") if hasattr(m, "model_dump") else dict(m))
+    expected_actions, observed_actions, action_recall, action_complete = action_completion(
+        task_obj, messages
+    )
 
     return {
         "domain": domain,
@@ -269,4 +317,8 @@ def run_task(
         "tools": tools,
         "messages": messages,
         "used_skill": bool(skill_text),
+        "expected_tool_calls": expected_actions,
+        "observed_tool_calls": observed_actions,
+        "action_recall": action_recall,
+        "action_complete": action_complete,
     }

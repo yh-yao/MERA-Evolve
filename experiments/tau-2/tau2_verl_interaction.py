@@ -21,6 +21,7 @@ class Tau2Interaction(BaseInteraction):
     def __init__(self, config: dict[str, Any]):
         super().__init__(config)
         self._instances: dict[str, dict[str, Any]] = {}
+        self._official_reward_weight = float(config.get("official_reward_weight", 0.5))
 
     async def start_interaction(
         self,
@@ -164,7 +165,12 @@ class Tau2Interaction(BaseInteraction):
             simulation=sim, task=state["task"], evaluation_type=evaluation_type_for(state["task"]),
             solo_mode=getattr(orch, "solo_mode", False), domain=orch.domain, mode=communication_mode(),
         )
-        state["score"] = float(info.reward)
+        official_reward = float(info.reward)
+        _, _, action_recall, _ = lib_tau2.action_completion(state["task"], sim.messages or [])
+        state["score"] = (
+            self._official_reward_weight * official_reward
+            + (1.0 - self._official_reward_weight) * action_recall
+        )
         state["finalized"] = True
         return float(state["score"])
 
