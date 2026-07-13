@@ -24,6 +24,7 @@ SFT_MICRO_BATCH_SIZE_PER_GPU="${SFT_MICRO_BATCH_SIZE_PER_GPU:-8}"
 SFT_MAX_LENGTH="${SFT_MAX_LENGTH:-2048}"
 SFT_LR="${SFT_LR:-1e-4}"
 SFT_TOTAL_EPOCHS="${SFT_TOTAL_EPOCHS:-3}"
+SFT_SAVE_FREQ="${SFT_SAVE_FREQ:--1}"
 SFT_PROJECT_NAME="${SFT_PROJECT_NAME:-verl_code_rl_sft}"
 SFT_EXPERIMENT_NAME="${SFT_EXPERIMENT_NAME:-sft}"
 
@@ -68,7 +69,7 @@ torchrun --standalone --nnodes=1 --nproc_per_node="$N_GPUS" \
   trainer.project_name="$SFT_PROJECT_NAME" \
   trainer.experiment_name="$SFT_EXPERIMENT_NAME" \
   trainer.default_local_dir="$CKPT_DIR" \
-  trainer.save_freq=1 \
+  trainer.save_freq="$SFT_SAVE_FREQ" \
   'trainer.logger=["console"]' \
   "${LORA_ARGS[@]}" \
   "$@"
