@@ -84,26 +84,29 @@ _nl_judge_primed = False
 
 
 def prime_nl_judge_routing(user_spec) -> None:
-    """Call once, single-threaded, before spawning concurrent rollout
-    workers. Tau2BenchAdapter._route_nl_judge_through() monkey-patches
-    MODULE-LEVEL globals (tau2_config.DEFAULT_LLM_NL_ASSERTIONS and friends)
-    guarded only by a per-instance `_nl_judge_routed` flag -- but
-    lib_tau2.run_task() constructs a FRESH Tau2BenchAdapter on every call, so
-    that per-instance guard does nothing across concurrent calls sharing one
-    process. Observed failure mode: a retail rollout's NL-assertion grading
-    call went to real `openai/gpt-5.2` (litellm's default routing) instead of
-    the patched local endpoint, raising "model does not exist" and forcing
-    that rollout's reward to 0 regardless of whether the conversation itself
-    was any good -- corrupts retail's reward signal under concurrency
-    (collect_traces.py can use a thread pool). Calling
-    this once, before any concurrent run_task() calls, sets the globals
-    ahead of time so every subsequent per-call adapter's routing call is a
-    no-op read of already-consistent state rather than a race to write it.
+    """Route tau2's module-level NL judge to the active user-model endpoint.
+
+    The stage2 adapter defaults the judge to ``openai/gpt-5.2`` while reusing
+    the caller's API URL. Our caller URL is a local vLLM server that only
+    serves ``evol-llm-user``, so retail evaluations requiring NL assertions
+    otherwise fail with a 404. Patch both copied globals directly and only
+    once per process, before concurrent collection or rollout work starts.
     """
     global _nl_judge_primed
     if _nl_judge_primed:
         return
-    _adapter()._route_nl_judge_through(dict(user_spec.args))
+    from tau2 import config as tau2_config
+    from tau2.evaluator import evaluator_nl_assertions as nl_mod
+
+    model = user_spec.model
+    args = {
+        **dict(user_spec.args),
+        "temperature": tau2_config.DEFAULT_LLM_NL_ASSERTIONS_TEMPERATURE,
+    }
+    tau2_config.DEFAULT_LLM_NL_ASSERTIONS = model
+    tau2_config.DEFAULT_LLM_NL_ASSERTIONS_ARGS = args
+    nl_mod.DEFAULT_LLM_NL_ASSERTIONS = model
+    nl_mod.DEFAULT_LLM_NL_ASSERTIONS_ARGS = args
     _nl_judge_primed = True
 
 
@@ -203,13 +206,11 @@ def run_task(
     from tau2.data_model.simulation import TextRunConfig
 
     from adapters.tau2_bench.adapter import (
-        Tau2BenchAdapter,
         _capture_agent_context,
         _communication_mode,
         _evaluation_type_for,
     )
 
-    adapter = _adapter()
     task_dict = load_task(domain, task_id)
     task_obj = Task.model_validate(task_dict)
     config = RunTaskConfig(agent=agent_spec, user=user_spec, seed=seed, max_steps=max_steps, max_errors=max_errors)
@@ -228,7 +229,7 @@ def run_task(
         num_trials=1,
     )
 
-    adapter._route_nl_judge_through(dict(config.user.args))
+    prime_nl_judge_routing(user_spec)
     orch = build_text_orchestrator(text_cfg, task_obj, seed=config.seed)
     if skill_text:
         orch.agent.domain_policy = f"{orch.agent.domain_policy}\n\n{skill_text}"
