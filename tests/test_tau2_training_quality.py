@@ -5,11 +5,14 @@ import inspect
 from pathlib import Path
 from types import SimpleNamespace
 
+import pandas as pd
+
 
 TAU2_EXPERIMENT = Path(__file__).parents[1] / "experiments" / "tau-2"
 sys.path.insert(0, str(TAU2_EXPERIMENT))
 
 import lib_tau2  # noqa: E402
+import traces_to_sft  # noqa: E402
 from tau2_verl_interaction import Tau2Interaction  # noqa: E402
 
 
@@ -77,3 +80,30 @@ def test_trace_with_explicitly_empty_action_requirements_is_complete() -> None:
 def test_verl_state_evaluator_is_an_instance_method() -> None:
     parameters = list(inspect.signature(Tau2Interaction._evaluate_state).parameters)
     assert parameters[0] == "self"
+
+
+def test_sft_tool_calls_survive_parquet_without_argument_union(tmp_path: Path) -> None:
+    messages = [
+        traces_to_sft._clean_message(
+            {
+                "role": "assistant",
+                "tool_calls": [{"name": "lookup", "arguments": {"user_id": "123"}}],
+            }
+        ),
+        traces_to_sft._clean_message(
+            {
+                "role": "assistant",
+                "tool_calls": [{"name": "cancel", "arguments": {"order_id": "456"}}],
+            }
+        ),
+    ]
+    output = tmp_path / "sft.parquet"
+
+    pd.DataFrame([{"messages": messages}]).to_parquet(output)
+    round_tripped = pd.read_parquet(output).iloc[0].messages
+
+    assert "tool_calls" not in round_tripped[0]
+    assert round_tripped[0]["content"] == (
+        '<tool_call>\n{"name":"lookup","arguments":{"user_id":"123"}}\n</tool_call>'
+    )
+    assert "order_id" not in round_tripped[0]["content"]

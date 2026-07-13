@@ -72,22 +72,33 @@ def _merge_consecutive_tool_messages(messages: list[dict]) -> list[dict]:
 
 def _clean_message(m: dict) -> dict:
     tool_calls = m.get("tool_calls")
-    clean_tc = None
-    if tool_calls:
-        clean_tc = [
-            {
-                "id": tc.get("id"),
-                "type": "function",
-                "function": {
-                    "name": tc.get("name") or (tc.get("function") or {}).get("name"),
-                    "arguments": tc.get("arguments") or (tc.get("function") or {}).get("arguments"),
-                },
-            }
-            for tc in tool_calls
-        ]
     out = {"role": m["role"], "content": m.get("content") or ""}
-    if clean_tc:
-        out["tool_calls"] = clean_tc
+    if tool_calls:
+        rendered_calls = []
+        for tc in tool_calls:
+            function = tc.get("function") or {}
+            name = tc.get("name") or function.get("name")
+            arguments = tc.get("arguments") or function.get("arguments") or {}
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except json.JSONDecodeError:
+                    pass
+            rendered_calls.append(
+                "<tool_call>\n"
+                + json.dumps(
+                    {"name": name, "arguments": arguments},
+                    separators=(",", ":"),
+                )
+                + "\n</tool_call>"
+            )
+        # Keep tool calls as rendered assistant text. PyArrow otherwise infers
+        # one union struct for every heterogeneous `arguments` dict in the
+        # parquet column and fills absent keys with null. Those null keys then
+        # become literal training targets and teach the model to pass every
+        # domain's arguments to every tool.
+        suffix = "\n".join(rendered_calls)
+        out["content"] = f"{out['content']}\n{suffix}" if out["content"] else suffix
     return out
 
 
