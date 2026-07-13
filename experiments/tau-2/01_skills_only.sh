@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Isolates the SkillBook's own effect on tau2-bench: no training of any kind.
 #   1. collect oracle traces on the 97-task TRAIN split (airline+retail+
-#      telecom_small; see lib_tau2.py's substitution note for why telecom's
+#      telecom_small; see tau2_evolve/benchmark.py for the telecom split.
 #      task_ids differ from tau2_stage2's original partition.json).
 #   2. build a domain-bucketed skillbook (airline/retail/telecom) from those
 #      traces' successful exemplars.
@@ -18,9 +18,12 @@ set -euo pipefail
 #
 # Usage: bash experiments/tau-2/01_skills_only.sh
 
-cd "$(dirname "$0")"
+EXPERIMENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$EXPERIMENT_DIR/../.." && pwd)"
+TAU2_WORKSPACE="${TAU2_WORKSPACE:-/shared_home/yuhang.yao/router-skills-evolve}"
+export PYTHONPATH="$EXPERIMENT_DIR:${PYTHONPATH:-}"
 
-TAU2_PYTHON="${TAU2_PYTHON:-/shared_home/yuhang.yao/router-skills-evolve/.venv_tau2/bin/python3}"
+TAU2_PYTHON="${TAU2_PYTHON:-$TAU2_WORKSPACE/.venv_tau2/bin/python3}"
 AGENT_MODEL="${AGENT_MODEL:-openai/evol-llm-agent}"
 AGENT_BASE_URL="${AGENT_BASE_URL:-http://127.0.0.1:8200/v1}"
 USER_MODEL="${USER_MODEL:-openai/evol-llm-user}"
@@ -29,14 +32,14 @@ WORKERS="${WORKERS:-6}"
 MAX_STEPS="${MAX_STEPS:-60}"
 DISTILLER_MODEL="${DISTILLER_MODEL:-openai/gpt-5.5}"
 DISTILLER_BASE_URL="${DISTILLER_BASE_URL:-https://api.commonstack.ai/v1}"
-RESULTS_DIR="${RESULTS_DIR:-../../results/tau2_skills_only}"
+RESULTS_DIR="${RESULTS_DIR:-$ROOT/results/tau2_skills_only}"
 
 mkdir -p "$RESULTS_DIR"
 echo "[skills-only] results dir: $RESULTS_DIR"
 
 echo
 echo "[skills-only] step 1: collect TRAIN traces (97 tasks)"
-"$TAU2_PYTHON" collect_traces.py \
+"$TAU2_PYTHON" -m tau2_evolve.collect_traces \
   --bucket TRAIN --workers "$WORKERS" --max-steps "$MAX_STEPS" \
   --agent-model "$AGENT_MODEL" --agent-base-url "$AGENT_BASE_URL" \
   --user-model "$USER_MODEL" --user-base-url "$USER_BASE_URL" \
@@ -44,14 +47,14 @@ echo "[skills-only] step 1: collect TRAIN traces (97 tasks)"
 
 echo
 echo "[skills-only] step 2: build domain-bucketed skillbook"
-"$TAU2_PYTHON" build_skillbook.py \
+"$TAU2_PYTHON" -m tau2_evolve.build_skillbook \
   --traces "$RESULTS_DIR/train_traces.jsonl" \
   --output "$RESULTS_DIR/skillbook.json" \
   --distiller-model "$DISTILLER_MODEL" --distiller-base-url "$DISTILLER_BASE_URL"
 
 echo
 echo "[skills-only] step 3: baseline eval (no skill) on 35-task EVAL split"
-"$TAU2_PYTHON" collect_traces.py \
+"$TAU2_PYTHON" -m tau2_evolve.collect_traces \
   --bucket EVAL --workers "$WORKERS" --max-steps "$MAX_STEPS" \
   --agent-model "$AGENT_MODEL" --agent-base-url "$AGENT_BASE_URL" \
   --user-model "$USER_MODEL" --user-base-url "$USER_BASE_URL" \
@@ -59,7 +62,7 @@ echo "[skills-only] step 3: baseline eval (no skill) on 35-task EVAL split"
 
 echo
 echo "[skills-only] step 4: skills eval (skill text appended to domain policy)"
-"$TAU2_PYTHON" collect_traces.py \
+"$TAU2_PYTHON" -m tau2_evolve.collect_traces \
   --bucket EVAL --workers "$WORKERS" --max-steps "$MAX_STEPS" \
   --agent-model "$AGENT_MODEL" --agent-base-url "$AGENT_BASE_URL" \
   --user-model "$USER_MODEL" --user-base-url "$USER_BASE_URL" \

@@ -9,9 +9,10 @@ set -euo pipefail
 # Prerequisites: small + large OpenAI-compatible vLLM servers already running
 # at SMALL_BASE_URL / LARGE_BASE_URL (see scripts/serve_vllm.sh).
 #
-# Usage: bash experiments/01_skills_only.sh
+# Usage: bash experiments/humaneval_mbpp/01_skills_only.sh
 
-cd "$(dirname "$0")/../.."
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$ROOT"
 
 PYTHON="${PYTHON:-python}"
 DATA="${DATA:-data/raw/he_mbpp.jsonl}"

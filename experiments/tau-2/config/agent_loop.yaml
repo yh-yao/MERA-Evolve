@@ -1,0 +1,2 @@
+- name: tau2_agent
+  _target_: tau2_evolve.agent_loop.Tau2AgentLoop

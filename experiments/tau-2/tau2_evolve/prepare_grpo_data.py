@@ -8,8 +8,8 @@ from pathlib import Path
 
 import datasets
 
-import lib_tau2
-from traces_to_sft import _render_tools_block
+from tau2_evolve import benchmark
+from tau2_evolve.traces_to_sft import _render_tools_block
 
 
 def first_user_message(row: dict) -> str:
@@ -33,7 +33,7 @@ def main() -> None:
     )
     args = ap.parse_args()
     skills = json.loads(args.skillbook.read_text())
-    user_spec = lib_tau2.make_llm_spec("openai/evol-llm-user", args.user_base_url)
+    user_spec = benchmark.make_llm_spec("openai/evol-llm-user", args.user_base_url)
     contexts: dict[str, tuple[str, list[dict]]] = {}
     rows = []
     skipped = 0
@@ -44,7 +44,7 @@ def main() -> None:
             continue
         domain = trace["domain"]
         if domain not in contexts:
-            contexts[domain] = lib_tau2.build_agent_context(
+            contexts[domain] = benchmark.build_agent_context(
                 domain=domain,
                 task_id=str(trace["task_id"]),
                 user_spec=user_spec,
@@ -84,7 +84,7 @@ def main() -> None:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     datasets.Dataset.from_list(rows).to_parquet(str(args.output))
     print(
-        f"[prepare_verl_grpo_data] wrote {len(rows)} rows to {args.output} "
+        f"[prepare_grpo_data] wrote {len(rows)} rows to {args.output} "
         f"(source domains={dict(sorted(raw_counts.items()))}, balanced={args.balance_domains}; "
         f"skipped {skipped} traces without messages)"
     )

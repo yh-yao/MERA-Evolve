@@ -1,7 +1,7 @@
 [project]
 name = "verl-code-rl"
 version = "0.1.0"
-description = "Clean verl + vLLM GRPO harness for HumanEval/MBPP code RL."
+description = "verl + vLLM evolution experiments for code generation and tau2-bench."
 requires-python = ">=3.10"
 dependencies = [
   "openai>=1.0",

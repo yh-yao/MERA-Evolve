@@ -2,13 +2,14 @@
 
 One subdirectory per task domain, so domain-specific tuning (learning rate,
 batch sizes, eager-mode requirements, etc.) never gets silently mixed up
-across domains. Each domain's config values live directly in its scripts'
-env-var defaults -- there is no separate `configs/` directory.
+across domains. Public entry points are numbered; domain-specific support
+code and VERL configuration stay inside that domain's directory.
 
 - `humaneval_mbpp/` — HumanEval + MBPP code generation
   (`data/raw/he_mbpp.jsonl`), the domain documented in `CLAUDE.md` and
   `docs/experiments/`.
-- `tau-2/` — reserved for τ²-bench, not yet populated.
+- `tau-2/` — tau2-bench SkillBook, SFT, and verl GRPO experiments. Its
+  numbered public entry points are documented in `tau-2/README.md`.
 
 ## humaneval_mbpp/
 

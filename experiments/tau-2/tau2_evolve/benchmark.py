@@ -16,15 +16,23 @@ reused via the adapter module's own helpers to stay in sync with it.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
 
-TAU2_STAGE2_CODE = Path("/shared_home/yuhang.yao/router-skills-evolve/tau2_stage2/code")
-VENDOR_ROOT = TAU2_STAGE2_CODE / "vendor" / "tau2-bench"
-PARTITION_PATH = Path(
-    "/shared_home/yuhang.yao/router-skills-evolve/tau2_stage2/data_processed/stage2_v1/partition.json"
+TAU2_WORKSPACE = Path(
+    os.environ.get("TAU2_WORKSPACE", "/shared_home/yuhang.yao/router-skills-evolve")
 )
+TAU2_STAGE2_ROOT = Path(
+    os.environ.get("TAU2_STAGE2_ROOT", str(TAU2_WORKSPACE / "tau2_stage2"))
+)
+TAU2_STAGE2_CODE = TAU2_STAGE2_ROOT / "code"
+VENDOR_ROOT = TAU2_STAGE2_CODE / "vendor" / "tau2-bench"
+PARTITION_PATH = Path(os.environ.get(
+    "TAU2_PARTITION_PATH",
+    str(TAU2_STAGE2_ROOT / "data_processed" / "stage2_v1" / "partition.json"),
+))
 
 for _p in (TAU2_STAGE2_CODE, VENDOR_ROOT / "src"):
     if str(_p) not in sys.path:
@@ -32,9 +40,10 @@ for _p in (TAU2_STAGE2_CODE, VENDOR_ROOT / "src"):
 
 # MERA's venv intentionally owns torch/transformers/verl. Append tau2's
 # site-packages only as a fallback for optional simulation dependencies.
-TAU2_SITE_PACKAGES = Path(
-    "/shared_home/yuhang.yao/router-skills-evolve/.venv_tau2/lib/python3.12/site-packages"
-)
+TAU2_SITE_PACKAGES = Path(os.environ.get(
+    "TAU2_SITE_PACKAGES",
+    str(TAU2_WORKSPACE / ".venv_tau2" / "lib" / "python3.12" / "site-packages"),
+))
 if str(TAU2_SITE_PACKAGES) not in sys.path:
     sys.path.append(str(TAU2_SITE_PACKAGES))
 
@@ -310,7 +319,7 @@ def run_task(
             mode=_communication_mode(),
         )
     except Exception as e:  # noqa: BLE001
-        print(f"[lib_tau2] evaluation failed for {domain}/{task_id}: {e}", file=sys.stderr)
+        print(f"[tau2] evaluation failed for {domain}/{task_id}: {e}", file=sys.stderr)
         sim.reward_info = None
 
     reward = float(sim.reward_info.reward) if sim.reward_info else 0.0

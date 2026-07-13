@@ -1,5 +1,5 @@
 interaction:
   - name: tau2
-    class_name: tau2_verl_interaction.Tau2Interaction
+    class_name: tau2_evolve.interaction.Tau2Interaction
     config:
       official_reward_weight: 0.5

@@ -11,10 +11,9 @@ import pandas as pd
 TAU2_EXPERIMENT = Path(__file__).parents[1] / "experiments" / "tau-2"
 sys.path.insert(0, str(TAU2_EXPERIMENT))
 
-import lib_tau2  # noqa: E402
-import traces_to_sft  # noqa: E402
-from skills import SkillBook  # noqa: E402
-from tau2_verl_interaction import Tau2Interaction  # noqa: E402
+from tau2_evolve import benchmark, traces_to_sft  # noqa: E402
+from tau2_evolve.interaction import Tau2Interaction  # noqa: E402
+from tau2_evolve.skills import SkillBook  # noqa: E402
 
 
 def test_action_completion_accepts_shorter_valid_read_path() -> None:
@@ -31,7 +30,7 @@ def test_action_completion_accepts_shorter_valid_read_path() -> None:
         {"tool_calls": [{"name": "lookup"}, {"function": {"name": "update"}}]},
     ]
 
-    _, _, recall, complete = lib_tau2.action_completion(task, messages)
+    _, _, recall, complete = benchmark.action_completion(task, messages)
 
     assert recall == 1.0
     assert complete is True
@@ -45,7 +44,7 @@ def test_action_completion_rejects_missing_action_type() -> None:
     }
     messages = [{"tool_calls": [{"name": "lookup"}]}]
 
-    _, _, recall, complete = lib_tau2.action_completion(task, messages)
+    _, _, recall, complete = benchmark.action_completion(task, messages)
 
     assert recall == 0.5
     assert complete is False
@@ -64,7 +63,7 @@ def test_action_completion_accepts_tau2_style_message_objects() -> None:
         SimpleNamespace(content="done"),
     ]
 
-    expected, observed, recall, complete = lib_tau2.action_completion(task, messages)
+    expected, observed, recall, complete = benchmark.action_completion(task, messages)
 
     assert expected == ["lookup", "update"]
     assert observed == expected
@@ -73,7 +72,7 @@ def test_action_completion_accepts_tau2_style_message_objects() -> None:
 
 
 def test_trace_with_explicitly_empty_action_requirements_is_complete() -> None:
-    assert lib_tau2.trace_action_complete(
+    assert benchmark.trace_action_complete(
         {"expected_tool_calls": [], "observed_tool_calls": []}
     )
 

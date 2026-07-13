@@ -1,19 +1,19 @@
 """verl multi-turn interaction backed by the real tau2 orchestrator."""
 from __future__ import annotations
 
+import os
 import re
 import sys
 import time
-from pathlib import Path
 from typing import Any, Optional
 
-TAU2_DIR = Path(__file__).resolve().parent
-sys.path.insert(0, str(TAU2_DIR))
 # Append (do not prepend) tau2's venv so optional voice dependencies missing
 # from MERA's venv resolve without overriding verl's transformers/tokenizers.
-sys.path.append("/shared_home/yuhang.yao/router-skills-evolve/.venv_tau2/lib/python3.12/site-packages")
+tau2_site_packages = os.environ.get("TAU2_SITE_PACKAGES")
+if tau2_site_packages and tau2_site_packages not in sys.path:
+    sys.path.append(tau2_site_packages)
 
-import lib_tau2
+from tau2_evolve import benchmark
 from verl.interactions.base import BaseInteraction
 
 
@@ -45,11 +45,11 @@ class Tau2Interaction(BaseInteraction):
         from tau2.utils.utils import get_now
 
         instance_id = instance_id or await super().start_interaction()
-        task = Task.model_validate(lib_tau2.load_task(domain, str(task_id)))
-        user_spec = lib_tau2.make_llm_spec(user_model, user_base_url)
+        task = Task.model_validate(benchmark.load_task(domain, str(task_id)))
+        user_spec = benchmark.make_llm_spec(user_model, user_base_url)
         # The agent object is only used to construct policy/tools and is never
         # asked to generate; verl owns every assistant generation.
-        agent_spec = lib_tau2.make_llm_spec("openai/evol-llm-agent", "http://127.0.0.1:1/v1")
+        agent_spec = benchmark.make_llm_spec("openai/evol-llm-agent", "http://127.0.0.1:1/v1")
         cfg = RunTaskConfig(agent=agent_spec, user=user_spec, seed=seed, max_steps=max_steps, max_errors=10)
         text_cfg = TextRunConfig(
             domain=domain, agent="llm_agent", llm_agent=cfg.agent.model,
@@ -57,7 +57,7 @@ class Tau2Interaction(BaseInteraction):
             llm_user=cfg.user.model, llm_args_user=dict(cfg.user.args),
             seed=seed, max_steps=max_steps, max_errors=10, num_trials=1,
         )
-        lib_tau2.prime_nl_judge_routing(user_spec)
+        benchmark.prime_nl_judge_routing(user_spec)
         orch = build_text_orchestrator(text_cfg, task, seed=seed, simulation_id=instance_id)
         if skill_text:
             orch.agent.domain_policy = f"{orch.agent.domain_policy}\n\n{skill_text}"
@@ -165,7 +165,7 @@ class Tau2Interaction(BaseInteraction):
             solo_mode=getattr(orch, "solo_mode", False), domain=orch.domain, mode=communication_mode(),
         )
         official_reward = float(info.reward)
-        _, _, action_recall, _ = lib_tau2.action_completion(state["task"], sim.messages or [])
+        _, _, action_recall, _ = benchmark.action_completion(state["task"], sim.messages or [])
         state["score"] = (
             self._official_reward_weight * official_reward
             + (1.0 - self._official_reward_weight) * action_recall

@@ -3,7 +3,8 @@ distill each domain's pitfalls/patterns from its successful exemplars.
 Mirrors verl_code_rl/build_skillbook.py's role.
 
 Usage (tau2_stage2 venv):
-  .../.venv_tau2/bin/python3 build_skillbook.py \
+  PYTHONPATH=experiments/tau-2 .../.venv_tau2/bin/python3 \
+    -m tau2_evolve.build_skillbook \
     --traces results/tau2_skills_only/train_traces.jsonl \
     --output results/tau2_skills_only/skillbook.json \
     [--distiller-model openai/gpt-5.5 --distiller-base-url https://api.commonstack.ai/v1 --api-key ...]
@@ -15,7 +16,7 @@ import json
 import os
 from pathlib import Path
 
-from skills import SkillBook, make_llm_distiller
+from tau2_evolve.skills import SkillBook, make_llm_distiller
 
 
 def main() -> int:

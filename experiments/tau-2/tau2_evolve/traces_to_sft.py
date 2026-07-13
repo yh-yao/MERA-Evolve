@@ -20,7 +20,8 @@ global conversation state, so per-turn concatenation matches whole-message
 tokenization exactly, like any ordinary multi-turn conversation.
 
 Usage (either venv works -- no tau2 imports needed here):
-  python3 traces_to_sft.py --traces results/tau2_skills_only/train_traces.jsonl \
+  PYTHONPATH=experiments/tau-2 python3 -m tau2_evolve.traces_to_sft \
+    --traces results/tau2_skills_only/train_traces.jsonl \
     --output results/tau2_skills_only/sft_pairs.parquet
 """
 from __future__ import annotations
@@ -32,7 +33,7 @@ from pathlib import Path
 
 import pandas as pd
 
-import lib_tau2
+from tau2_evolve import benchmark
 
 TOOLS_BLOCK_TEMPLATE = (
     "\n\n# Tools\n\nYou may call one or more functions to assist with the user "
@@ -138,7 +139,7 @@ def main() -> int:
             n_total += 1
             if not row.get("passed"):
                 continue
-            if not lib_tau2.trace_action_complete(row):
+            if not benchmark.trace_action_complete(row):
                 n_incomplete += 1
                 continue
             system_content = row["system_prompt"] + _render_tools_block(row.get("tools", []))

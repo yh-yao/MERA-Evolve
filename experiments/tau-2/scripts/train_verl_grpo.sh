@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="/shared_home/yuhang.yao/MERA-Evolve"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+EXPERIMENT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+ROOT="$(cd "$EXPERIMENT_DIR/../.." && pwd)"
+TAU2_WORKSPACE="${TAU2_WORKSPACE:-/shared_home/yuhang.yao/router-skills-evolve}"
+TAU2_STAGE2_ROOT="${TAU2_STAGE2_ROOT:-$TAU2_WORKSPACE/tau2_stage2}"
 : "${TRAIN_FILE:?set TRAIN_FILE}"
 : "${OUTPUT_DIR:?set OUTPUT_DIR}"
 MODEL_PATH="${MODEL_PATH:-Qwen/Qwen2.5-1.5B-Instruct}"
@@ -21,7 +25,8 @@ MAX_MODEL_LENGTH="$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH))"
 
 cd "$ROOT"
 source venv/bin/activate
-export PYTHONPATH="$ROOT/experiments/tau-2:$ROOT/experiments/tau-2/compat:/shared_home/yuhang.yao/router-skills-evolve/tau2_stage2/code:/shared_home/yuhang.yao/router-skills-evolve/tau2_stage2/code/vendor/tau2-bench/src:${PYTHONPATH:-}"
+export TAU2_WORKSPACE TAU2_STAGE2_ROOT
+export PYTHONPATH="$EXPERIMENT_DIR:$EXPERIMENT_DIR/compat:$TAU2_STAGE2_ROOT/code:$TAU2_STAGE2_ROOT/code/vendor/tau2-bench/src:${PYTHONPATH:-}"
 
 LORA_ARGS=(
   actor_rollout_ref.model.lora_rank=16
@@ -62,8 +67,8 @@ python -m verl.trainer.main_ppo \
   actor_rollout_ref.rollout.multi_turn.enable=True \
   actor_rollout_ref.rollout.multi_turn.max_user_turns="$MAX_TURNS" \
   actor_rollout_ref.rollout.multi_turn.max_assistant_turns="$MAX_TURNS" \
-  actor_rollout_ref.rollout.multi_turn.interaction_config_path="$ROOT/experiments/tau-2/tau2_interaction.yaml" \
-  actor_rollout_ref.rollout.agent.agent_loop_config_path="$ROOT/experiments/tau-2/tau2_agent_loop.yaml" \
+  actor_rollout_ref.rollout.multi_turn.interaction_config_path="$EXPERIMENT_DIR/config/interaction.yaml" \
+  actor_rollout_ref.rollout.agent.agent_loop_config_path="$EXPERIMENT_DIR/config/agent_loop.yaml" \
   actor_rollout_ref.rollout.agent.num_workers="$AGENT_LOOP_WORKERS" \
   actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu="$PPO_MICRO_BATCH_SIZE" \
   reward.num_workers="$REWARD_WORKERS" \

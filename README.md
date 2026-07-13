@@ -1,8 +1,8 @@
 # MERA-Evolve
 
-MERA-Evolve is a compact evolve loop for HumanEval + MBPP code models. It keeps
-the training core on `verl`, while adding the useful outer loop from
-`router-skills-evolve`:
+MERA-Evolve is a compact `verl` + vLLM evolve-loop research harness. It has
+reproducible experiment suites for HumanEval/MBPP code generation and
+tau2-bench tool-use agents.
 
 - `verl` for RL training
 - vLLM for rollout inside verl and for standalone evaluation serving
@@ -17,35 +17,26 @@ the training core on `verl`, while adding the useful outer loop from
 ## Layout
 
 ```text
-data/raw/                  copied HumanEval/MBPP JSONL
-data/processed/            verl parquet files, generated locally
-verl_code_rl/code_eval.py   code extraction + subprocess test execution
-verl_code_rl/reward.py      verl custom_reward_function.compute_score
-verl_code_rl/prepare_data.py
-verl_code_rl/eval_vllm.py
-verl_code_rl/collect_traces.py
-verl_code_rl/build_skillbook.py
-verl_code_rl/traces_to_sft.py  teacher + self-repair SFT pair extraction (parquet)
-verl_code_rl/extract_sft_lora_adapter.py  reconstructs a loadable LoRA adapter from a verl SFT checkpoint
-verl_code_rl/embedding.py   frozen text-embedding featurizer shared by the router
-verl_code_rl/train_router.py
-verl_code_rl/run_ablation.py
-verl_code_rl/trace_diagnostics.py
-scripts/prepare_data.sh
-scripts/train_grpo.sh
-scripts/train_sft.sh           explicit version-pinned SFT launcher hook
-scripts/reload_small_vllm.sh   local checkpoint reload helper
-scripts/serve_vllm.sh
-scripts/eval_vllm.sh
-scripts/run_full_pipeline.sh
+verl_code_rl/                 reusable HumanEval/MBPP pipeline modules
+experiments/humaneval_mbpp/   numbered code-generation experiments
+experiments/tau-2/            numbered tau2-bench experiments
+scripts/                      shared training, serving, and pipeline launchers
+tests/                        unit and integration-level regression tests
+docs/experiments/             checked-in experiment reports
+data/raw/                     HumanEval/MBPP source data
+results/ and outputs/         generated artifacts, ignored by git
 ```
+
+See [`experiments/README.md`](experiments/README.md) for the experiment index
+and [`experiments/tau-2/README.md`](experiments/tau-2/README.md) for TAU-2
+environment requirements.
 
 ## Setup
 
 ```bash
-cd /Users/YuhangYao/Desktop/MERA-Evolve
-python -m venv .venv
-source .venv/bin/activate
+cd MERA-Evolve
+python -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
 ```
 

@@ -20,9 +20,10 @@ set -euo pipefail
 # must point at a command that restarts the small server with the new
 # checkpoint (default: scripts/reload_small_vllm.sh on SMALL_RELOAD_GPU).
 #
-# Usage: bash experiments/05_4cycle_sft_grpo.sh
+# Usage: bash experiments/humaneval_mbpp/05_4cycle_sft_grpo.sh
 
-cd "$(dirname "$0")/../.."
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$ROOT"
 
 DATA="${DATA:-data/raw/he_mbpp.jsonl}"
 SMALL_MODEL="${SMALL_MODEL:-Qwen/Qwen2.5-Coder-1.5B-Instruct}"

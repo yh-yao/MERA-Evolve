@@ -12,7 +12,8 @@ main user role and the fallback (agent+user) default to the same local 3B
 endpoint for now -- no hosted user-simulator API calls.
 
 Usage (tau2_stage2 venv):
-  .../.venv_tau2/bin/python3 experiments/tau-2/collect_traces.py \
+  PYTHONPATH=experiments/tau-2 .../.venv_tau2/bin/python3 \
+    -m tau2_evolve.collect_traces \
     --bucket TRAIN \
     --agent-base-url http://127.0.0.1:8200/v1 \
     --user-base-url http://127.0.0.1:8201/v1 \
@@ -27,13 +28,13 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-import lib_tau2
+from tau2_evolve import benchmark
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--bucket", default="TRAIN", choices=["TRAIN", "EVAL", "DIAG", "VAL"])
-    ap.add_argument("--domain", default=None, choices=lib_tau2.DOMAINS)
+    ap.add_argument("--domain", default=None, choices=benchmark.DOMAINS)
     ap.add_argument("--limit", type=int, default=-1)
     ap.add_argument("--agent-model", default="openai/evol-llm-agent")
     ap.add_argument("--agent-base-url", default="http://127.0.0.1:8200/v1")
@@ -68,7 +69,7 @@ def main() -> int:
     if args.fallback_attempts < 1:
         ap.error("--fallback-attempts must be at least 1")
 
-    tasks = lib_tau2.task_ids_for(args.bucket, args.domain)
+    tasks = benchmark.task_ids_for(args.bucket, args.domain)
     if args.limit >= 0:
         tasks = tasks[: args.limit]
 
@@ -76,20 +77,20 @@ def main() -> int:
     if args.skillbook:
         skillbook = json.loads(args.skillbook.read_text())
 
-    agent_spec = lib_tau2.make_llm_spec(args.agent_model, args.agent_base_url, args.agent_api_key)
-    user_spec = lib_tau2.make_llm_spec(args.user_model, args.user_base_url, args.user_api_key)
-    lib_tau2.prime_nl_judge_routing(user_spec)  # single-threaded, before the pool below
+    agent_spec = benchmark.make_llm_spec(args.agent_model, args.agent_base_url, args.agent_api_key)
+    user_spec = benchmark.make_llm_spec(args.user_model, args.user_base_url, args.user_api_key)
+    benchmark.prime_nl_judge_routing(user_spec)  # single-threaded, before the pool below
 
     fallback_agent_spec = fallback_user_spec = None
     if args.probe_only:
-        fallback_agent_spec = lib_tau2.make_llm_spec(
+        fallback_agent_spec = benchmark.make_llm_spec(
             args.fallback_agent_model or args.user_model,
             args.fallback_agent_base_url or args.user_base_url,
             args.fallback_agent_api_key
             or os.environ.get("COMMONSTACK_API_KEY")
             or args.user_api_key,
         )
-        fallback_user_spec = lib_tau2.make_llm_spec(
+        fallback_user_spec = benchmark.make_llm_spec(
             args.fallback_user_model or args.user_model,
             args.fallback_user_base_url or args.user_base_url,
             args.fallback_user_api_key or args.user_api_key,
@@ -104,32 +105,32 @@ def main() -> int:
 
     def _collect_one(domain: str, task_id: str) -> dict:
         skill_text = skillbook.get(domain, "")
-        main_row = lib_tau2.run_task(
+        main_row = benchmark.run_task(
             domain=domain, task_id=task_id, agent_spec=agent_spec, user_spec=user_spec,
             seed=args.seed, max_steps=args.max_steps, max_errors=args.max_errors,
             skill_text=skill_text,
         )
         main_row["fallback_used"] = False
-        if (main_row["passed"] and lib_tau2.trace_action_complete(main_row)) or not args.probe_only:
+        if (main_row["passed"] and benchmark.trace_action_complete(main_row)) or not args.probe_only:
             return main_row
 
         fallback_rows = []
         for attempt in range(1, args.fallback_attempts + 1):
-            fallback_row = lib_tau2.run_task(
+            fallback_row = benchmark.run_task(
                 domain=domain, task_id=task_id, agent_spec=fallback_agent_spec,
                 user_spec=fallback_user_spec, seed=args.seed, max_steps=args.max_steps,
                 max_errors=args.max_errors, skill_text=skill_text,
             )
             fallback_row["fallback_attempt"] = attempt
             fallback_rows.append(fallback_row)
-            if fallback_row.get("passed") and lib_tau2.trace_action_complete(fallback_row):
+            if fallback_row.get("passed") and benchmark.trace_action_complete(fallback_row):
                 break
         fallback_row = max(
             fallback_rows,
             key=lambda row: (
-                bool(row.get("passed") and lib_tau2.trace_action_complete(row)),
+                bool(row.get("passed") and benchmark.trace_action_complete(row)),
                 bool(row.get("passed")),
-                lib_tau2.trace_action_complete(row),
+                benchmark.trace_action_complete(row),
                 float(row.get("reward", 0.0)),
                 float(row.get("action_recall", 0.0)),
             ),
@@ -157,7 +158,7 @@ def main() -> int:
                 fallback_rescued += int(
                     row.get("fallback_used", False)
                     and row.get("passed", False)
-                    and lib_tau2.trace_action_complete(row)
+                    and benchmark.trace_action_complete(row)
                 )
                 out.write(json.dumps(row, ensure_ascii=False) + "\n")
                 out.flush()

@@ -11,9 +11,9 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import lib_tau2
+from tau2_evolve import benchmark
 
-DOMAINS = ["airline", "retail", "telecom"]
+DOMAINS = benchmark.DOMAINS
 
 _STATIC_SECTIONS: dict[str, dict[str, str]] = {
     "airline": {
@@ -120,7 +120,7 @@ class SkillBook:
         }
 
     def add_exemplar(self, domain: str, trace_row: dict) -> None:
-        if trace_row.get("passed") and lib_tau2.trace_action_complete(trace_row):
+        if trace_row.get("passed") and benchmark.trace_action_complete(trace_row):
             self.skills[domain].exemplars.append(trace_row)
 
     def distill_all(self, distiller=None) -> None:

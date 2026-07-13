@@ -14,9 +14,10 @@ set -euo pipefail
 # from whatever GPU serves SMALL_BASE_URL (training and serving can't safely
 # share one GPU's memory budget).
 #
-# Usage: bash experiments/02_sft_only.sh
+# Usage: bash experiments/humaneval_mbpp/02_sft_only.sh
 
-cd "$(dirname "$0")/../.."
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$ROOT"
 
 PYTHON="${PYTHON:-python}"
 DATA="${DATA:-data/raw/he_mbpp.jsonl}"

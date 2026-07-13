@@ -10,26 +10,33 @@ set -euo pipefail
 #
 # Env vars (all required to be set explicitly by the caller for this
 # overnight run -- no interactive prompts):
-#   RESULTS_DIR, AGENT_GPU, AGENT_PORT, USER_GPU, USER_PORT, ENABLE_GRPO,
-#   GRPO_GPU (only if ENABLE_GRPO=1), N_CYCLES
+#   RESULTS_DIR, AGENT_GPU, AGENT_PORT, USER_GPU, USER_PORT, TRAIN_GPU,
+#   ENABLE_GRPO, N_CYCLES
+# GRPO_GPU remains a backward-compatible alias for TRAIN_GPU.
 
-cd "$(dirname "$0")"
-export PYTHONPATH="/shared_home/yuhang.yao/MERA-Evolve/venv/lib/python3.12/site-packages"
-TAU2_PY="/shared_home/yuhang.yao/router-skills-evolve/.venv_tau2/bin/python3"
-MERA_PY="/shared_home/yuhang.yao/MERA-Evolve/venv/bin/python3"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+EXPERIMENT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+ROOT="$(cd "$EXPERIMENT_DIR/../.." && pwd)"
+TAU2_WORKSPACE="${TAU2_WORKSPACE:-/shared_home/yuhang.yao/router-skills-evolve}"
+TAU2_PY="${TAU2_PYTHON:-$TAU2_WORKSPACE/.venv_tau2/bin/python3}"
+MERA_PY="${MERA_PYTHON:-$ROOT/venv/bin/python3}"
+VLLM_BIN="${VLLM_BIN:-$ROOT/venv/bin/vllm}"
+export TAU2_WORKSPACE
+export PYTHONPATH="$EXPERIMENT_DIR:$ROOT/venv/lib/python3.12/site-packages:${PYTHONPATH:-}"
+cd "$ROOT"
 
 RESULTS_DIR="${RESULTS_DIR:?set RESULTS_DIR}"
 case "$RESULTS_DIR" in
   /*) ;;
-  *) echo "FATAL: RESULTS_DIR must be an absolute path (got: $RESULTS_DIR) -- this script cd's into" \
-          "experiments/tau-2/ first, so a relative path would land in the wrong place." >&2; exit 2 ;;
+  *) echo "FATAL: RESULTS_DIR must be an absolute path (got: $RESULTS_DIR)" >&2; exit 2 ;;
 esac
 AGENT_GPU="${AGENT_GPU:?set AGENT_GPU}"
 AGENT_PORT="${AGENT_PORT:?set AGENT_PORT}"
 USER_GPU="${USER_GPU:?set USER_GPU}"
 USER_PORT="${USER_PORT:?set USER_PORT}"
 ENABLE_GRPO="${ENABLE_GRPO:-0}"
-GRPO_GPU="${GRPO_GPU:-}"
+TRAIN_GPU="${TRAIN_GPU:-${GRPO_GPU:-}}"
+TRAIN_GPU="${TRAIN_GPU:?set TRAIN_GPU (the GPU used for SFT and optional GRPO)}"
 N_CYCLES="${N_CYCLES:-4}"
 START_CYCLE="${START_CYCLE:-0}"
 INITIAL_ADAPTER="${INITIAL_ADAPTER:-}"
@@ -47,7 +54,11 @@ mkdir -p "$RESULTS_DIR"
 LOG="$RESULTS_DIR/pipeline.log"
 log() { echo "[$(date -u +%H:%M:%S)] $*" | tee -a "$LOG"; }
 
-set -a; source /shared_home/yuhang.yao/MERA-Evolve/.env; set +a
+if [[ -f "$ROOT/.env" ]]; then
+  set -a
+  source "$ROOT/.env"
+  set +a
+fi
 
 if ! [[ "$START_CYCLE" =~ ^[0-9]+$ ]] || (( START_CYCLE >= N_CYCLES )); then
   log "FATAL: START_CYCLE must be an integer in [0, $((N_CYCLES - 1))] (got: $START_CYCLE)" >&2
@@ -76,7 +87,7 @@ start_agent_server() {
   fi
   log "starting agent server (base, no adapter) on GPU $gpu port $port"
   CUDA_VISIBLE_DEVICES="$gpu" VLLM_USE_FLASHINFER_SAMPLER=0 VLLM_ALLOW_RUNTIME_LORA_UPDATING=True \
-    nohup /shared_home/yuhang.yao/MERA-Evolve/venv/bin/vllm serve "$BASE_MODEL" \
+    nohup "$VLLM_BIN" serve "$BASE_MODEL" \
     --served-model-name evol-llm-agent \
     --enable-lora --max-lora-rank 16 \
     --port "$port" --gpu-memory-utilization 0.5 --max-model-len 16384 \
@@ -103,7 +114,7 @@ start_user_server() {
   fi
   log "starting user server on GPU $gpu port $port"
   CUDA_VISIBLE_DEVICES="$gpu" VLLM_USE_FLASHINFER_SAMPLER=0 \
-    nohup /shared_home/yuhang.yao/MERA-Evolve/venv/bin/vllm serve "$USER_MODEL_PATH" \
+    nohup "$VLLM_BIN" serve "$USER_MODEL_PATH" \
     --served-model-name evol-llm-user \
     --port "$port" --gpu-memory-utilization 0.5 --max-model-len 16384 \
     --dtype bfloat16 --trust-remote-code --enforce-eager \
@@ -165,7 +176,7 @@ for ((cycle=START_CYCLE; cycle<N_CYCLES; cycle++)); do
   SKILL_ARG=()
   [[ -n "$PREV_SKILLBOOK" ]] && SKILL_ARG=(--skillbook "$PREV_SKILLBOOK")
   log "collecting TRAIN traces (skillbook=${PREV_SKILLBOOK:-none})"
-  "$TAU2_PY" collect_traces.py \
+  "$TAU2_PY" -m tau2_evolve.collect_traces \
     --bucket TRAIN --workers 6 --max-steps "$COLLECT_MAX_STEPS" --probe-only \
     --agent-model "openai/evol-llm-agent" --agent-base-url "$AGENT_BASE_URL" \
     --user-model "openai/evol-llm-user" --user-base-url "$USER_BASE_URL" \
@@ -177,14 +188,15 @@ for ((cycle=START_CYCLE; cycle<N_CYCLES; cycle++)); do
 
   # 2. skillbook
   log "building skillbook"
-  "$TAU2_PY" build_skillbook.py \
+  "$TAU2_PY" -m tau2_evolve.build_skillbook \
     --traces "$OUT/train_traces.jsonl" --output "$OUT/skillbook.json" \
     --distiller-model "$DISTILLER_MODEL" --distiller-base-url "$DISTILLER_BASE_URL" \
     --api-key "$COMMONSTACK_API_KEY" >> "$LOG" 2>&1
 
   # 3. SFT (LoRA continuation from previous cycle's adapter, if any)
   log "building SFT pairs"
-  "$MERA_PY" traces_to_sft.py --traces "$OUT/train_traces.jsonl" --output "$OUT/sft_pairs.parquet" >> "$LOG" 2>&1
+  "$MERA_PY" -m tau2_evolve.traces_to_sft \
+    --traces "$OUT/train_traces.jsonl" --output "$OUT/sft_pairs.parquet" >> "$LOG" 2>&1
 
   SFT_ADAPTER="$OUT/sft_adapter"
   if [[ -s "$OUT/sft_pairs.parquet" ]]; then
@@ -199,8 +211,8 @@ for ((cycle=START_CYCLE; cycle<N_CYCLES; cycle++)); do
     # silently resolves to system python (no `verl` installed), which
     # crashed both overnight pipelines identically on the first attempt
     # (ModuleNotFoundError: No module named 'verl', caught by set -e).
-    ( cd /shared_home/yuhang.yao/MERA-Evolve && source venv/bin/activate && \
-      env CUDA_VISIBLE_DEVICES="${GRPO_GPU:-$USER_GPU}" \
+    ( cd "$ROOT" && source venv/bin/activate && \
+      env CUDA_VISIBLE_DEVICES="$TRAIN_GPU" \
       SFT_DATA="$OUT/sft_pairs.parquet" \
       SFT_OUTPUT_DIR="$SFT_ADAPTER" \
       MODEL_PATH="$BASE_MODEL" \
@@ -220,15 +232,15 @@ for ((cycle=START_CYCLE; cycle<N_CYCLES; cycle++)); do
     reload_agent "$CURRENT_ADAPTER"  # keep the external eval server in sync
     GRPO_OUT="$OUT/verl_grpo"
     VERL_DATA="$OUT/verl_grpo.parquet"
-    "$MERA_PY" prepare_verl_grpo_data.py \
+    "$MERA_PY" -m tau2_evolve.prepare_grpo_data \
       --traces "$OUT/train_traces.jsonl" --skillbook "$OUT/skillbook.json" \
       --user-base-url "$USER_BASE_URL" --output "$VERL_DATA" >> "$LOG" 2>&1
-    ( cd /shared_home/yuhang.yao/MERA-Evolve && \
-      env CUDA_VISIBLE_DEVICES="$GRPO_GPU" TRAIN_FILE="$VERL_DATA" \
+    ( cd "$ROOT" && \
+      env CUDA_VISIBLE_DEVICES="$TRAIN_GPU" TRAIN_FILE="$VERL_DATA" \
       OUTPUT_DIR="$GRPO_OUT" MODEL_PATH="$BASE_MODEL" \
       LORA_ADAPTER_PATH="$CURRENT_ADAPTER" TOTAL_STEPS=10 \
       EXPERIMENT_NAME="cycle${cycle}_$(basename "$RESULTS_DIR")" \
-      bash experiments/tau-2/train_verl_grpo.sh ) >> "$LOG" 2>&1
+      bash experiments/tau-2/scripts/train_verl_grpo.sh ) >> "$LOG" 2>&1
     CURRENT_ADAPTER="$(<"$GRPO_OUT/final_adapter_path.txt")"
     if [[ ! -s "$CURRENT_ADAPTER/adapter_model.safetensors" ]]; then
       log "FATAL: verl GRPO adapter is missing: $CURRENT_ADAPTER"
@@ -241,7 +253,7 @@ for ((cycle=START_CYCLE; cycle<N_CYCLES; cycle++)); do
     reload_agent "$CURRENT_ADAPTER"
   fi
   log "held-out EVAL (35 tasks)"
-  "$TAU2_PY" collect_traces.py \
+  "$TAU2_PY" -m tau2_evolve.collect_traces \
     --bucket EVAL --workers 6 --max-steps 60 \
     --agent-model "openai/evol-llm-agent" --agent-base-url "$AGENT_BASE_URL" \
     --user-model "openai/evol-llm-user" --user-base-url "$USER_BASE_URL" \

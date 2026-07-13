@@ -21,9 +21,10 @@ set -euo pipefail
 # at SMALL_BASE_URL / LARGE_BASE_URL. Needs a free GPU for TRAIN_GPU, separate
 # from whatever GPU serves SMALL_BASE_URL.
 #
-# Usage: bash experiments/03_grpo_only.sh
+# Usage: bash experiments/humaneval_mbpp/03_grpo_only.sh
 
-cd "$(dirname "$0")/../.."
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$ROOT"
 
 PYTHON="${PYTHON:-python}"
 DATA="${DATA:-data/raw/he_mbpp.jsonl}"

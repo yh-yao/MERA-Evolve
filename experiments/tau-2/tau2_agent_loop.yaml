@@ -1,2 +1,0 @@
-- name: tau2_agent
-  _target_: tau2_verl_agent_loop.Tau2AgentLoop
