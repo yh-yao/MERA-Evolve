@@ -1,0 +1,4 @@
+interaction:
+  - name: tau2
+    class_name: tau2_verl_interaction.Tau2Interaction
+    config: {}
