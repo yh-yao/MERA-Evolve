@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 from pathlib import Path
 
 import pandas as pd
@@ -102,51 +103,75 @@ def _clean_message(m: dict) -> dict:
     return out
 
 
+def _balance_domains(rows: list[dict], seed: int = 42) -> list[dict]:
+    """Deterministically oversample each domain to the largest domain size."""
+    by_domain: dict[str, list[dict]] = {}
+    for row in rows:
+        by_domain.setdefault(row["domain"], []).append(row)
+    if not by_domain:
+        return []
+
+    target = max(len(domain_rows) for domain_rows in by_domain.values())
+    balanced = []
+    for domain in sorted(by_domain):
+        domain_rows = by_domain[domain]
+        balanced.extend(domain_rows[i % len(domain_rows)] for i in range(target))
+    random.Random(seed).shuffle(balanced)
+    return balanced
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--traces", type=Path, required=True)
+    ap.add_argument("--traces", type=Path, action="append", required=True)
     ap.add_argument("--output", type=Path, required=True)
+    ap.add_argument("--balance-domains", action="store_true")
     args = ap.parse_args()
 
     rows_out = []
     n_total = 0
     n_incomplete = 0
-    for line in args.traces.read_text().splitlines():
-        if not line.strip():
-            continue
-        row = json.loads(line)
-        n_total += 1
-        if not row.get("passed"):
-            continue
-        if not lib_tau2.trace_action_complete(row):
-            n_incomplete += 1
-            continue
-        system_content = row["system_prompt"] + _render_tools_block(row.get("tools", []))
-        messages = [{"role": "system", "content": system_content}]
-        messages.extend(_clean_message(m) for m in row.get("messages", []))
-        messages = _merge_consecutive_tool_messages(messages)
-        # Loss is masked by role=="assistant" regardless of which model actually
-        # generated the turn -- so in a fallback-rescued row (agent+user both
-        # played by the fallback model), only the assistant-side turns become
-        # imitation targets, exactly like a genuine main-attempt success. Track
-        # fallback_used so downstream reporting can tell "reinforcing what the
-        # small model already does" (main success) apart from "teaching it
-        # something it couldn't do itself" (fallback rescue) -- same
-        # teacher-pair vs self-repair-pair distinction as verl_code_rl's
-        # traces_to_sft.py, just for a multi-turn agent instead of one-shot code.
-        rows_out.append({
-            "domain": row["domain"],
-            "task_id": row["task_id"],
-            "messages": messages,
-            "fallback_used": bool(row.get("fallback_used", False)),
-        })
+    for traces_path in args.traces:
+        for line in traces_path.read_text().splitlines():
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            n_total += 1
+            if not row.get("passed"):
+                continue
+            if not lib_tau2.trace_action_complete(row):
+                n_incomplete += 1
+                continue
+            system_content = row["system_prompt"] + _render_tools_block(row.get("tools", []))
+            messages = [{"role": "system", "content": system_content}]
+            messages.extend(_clean_message(m) for m in row.get("messages", []))
+            messages = _merge_consecutive_tool_messages(messages)
+            # Loss is masked by role=="assistant" regardless of which model actually
+            # generated the turn -- so in a fallback-rescued row (agent+user both
+            # played by the fallback model), only the assistant-side turns become
+            # imitation targets, exactly like a genuine main-attempt success. Track
+            # fallback_used so downstream reporting can tell "reinforcing what the
+            # small model already does" (main success) apart from "teaching it
+            # something it couldn't do itself" (fallback rescue) -- same
+            # teacher-pair vs self-repair-pair distinction as verl_code_rl's
+            # traces_to_sft.py, just for a multi-turn agent instead of one-shot code.
+            rows_out.append({
+                "domain": row["domain"],
+                "task_id": row["task_id"],
+                "messages": messages,
+                "fallback_used": bool(row.get("fallback_used", False)),
+            })
 
     n_fallback = sum(r["fallback_used"] for r in rows_out)
+    n_unbalanced = len(rows_out)
+    if args.balance_domains:
+        rows_out = _balance_domains(rows_out)
     print(
-        f"[traces_to_sft] {len(rows_out)}/{n_total} trajectories passed -> SFT rows "
-        f"({len(rows_out) - n_fallback} main-success, {n_fallback} fallback-rescued/teacher; "
+        f"[traces_to_sft] {n_unbalanced}/{n_total} trajectories passed -> SFT rows "
+        f"({n_unbalanced - n_fallback} main-success, {n_fallback} fallback-rescued/teacher; "
         f"excluded {n_incomplete} passed but action-incomplete)"
     )
+    if args.balance_domains:
+        print(f"[traces_to_sft] domain-balanced {n_unbalanced} -> {len(rows_out)} rows")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(rows_out).to_parquet(args.output)
     print(f"[traces_to_sft] wrote {args.output}")

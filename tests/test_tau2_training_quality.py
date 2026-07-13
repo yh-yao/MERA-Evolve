@@ -107,3 +107,23 @@ def test_sft_tool_calls_survive_parquet_without_argument_union(tmp_path: Path) -
         '<tool_call>\n{"name":"lookup","arguments":{"user_id":"123"}}\n</tool_call>'
     )
     assert "order_id" not in round_tripped[0]["content"]
+
+
+def test_sft_domain_balancing_is_deterministic() -> None:
+    rows = [
+        {"domain": "airline", "task_id": "a1"},
+        {"domain": "retail", "task_id": "r1"},
+        {"domain": "retail", "task_id": "r2"},
+        {"domain": "telecom", "task_id": "t1"},
+    ]
+
+    first = traces_to_sft._balance_domains(rows)
+    second = traces_to_sft._balance_domains(rows)
+
+    assert first == second
+    assert len(first) == 6
+    assert {domain: sum(r["domain"] == domain for r in first) for domain in {"airline", "retail", "telecom"}} == {
+        "airline": 2,
+        "retail": 2,
+        "telecom": 2,
+    }
