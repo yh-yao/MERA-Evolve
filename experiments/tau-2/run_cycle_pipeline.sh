@@ -31,6 +31,9 @@ USER_PORT="${USER_PORT:?set USER_PORT}"
 ENABLE_GRPO="${ENABLE_GRPO:-0}"
 GRPO_GPU="${GRPO_GPU:-}"
 N_CYCLES="${N_CYCLES:-4}"
+START_CYCLE="${START_CYCLE:-0}"
+INITIAL_ADAPTER="${INITIAL_ADAPTER:-}"
+INITIAL_SKILLBOOK="${INITIAL_SKILLBOOK:-}"
 BASE_MODEL="Qwen/Qwen2.5-1.5B-Instruct"
 USER_MODEL_PATH="Qwen/Qwen2.5-3B-Instruct"
 DISTILLER_MODEL="openai/gpt-5.5"
@@ -42,7 +45,20 @@ log() { echo "[$(date -u +%H:%M:%S)] $*" | tee -a "$LOG"; }
 
 set -a; source /shared_home/yuhang.yao/MERA-Evolve/.env; set +a
 
-log "=== starting: RESULTS_DIR=$RESULTS_DIR ENABLE_GRPO=$ENABLE_GRPO N_CYCLES=$N_CYCLES ==="
+if ! [[ "$START_CYCLE" =~ ^[0-9]+$ ]] || (( START_CYCLE >= N_CYCLES )); then
+  log "FATAL: START_CYCLE must be an integer in [0, $((N_CYCLES - 1))] (got: $START_CYCLE)" >&2
+  exit 2
+fi
+[[ -z "$INITIAL_ADAPTER" || -s "$INITIAL_ADAPTER/adapter_model.safetensors" ]] || {
+  log "FATAL: INITIAL_ADAPTER is not a loadable LoRA adapter: $INITIAL_ADAPTER" >&2
+  exit 2
+}
+[[ -z "$INITIAL_SKILLBOOK" || -s "$INITIAL_SKILLBOOK" ]] || {
+  log "FATAL: INITIAL_SKILLBOOK does not exist: $INITIAL_SKILLBOOK" >&2
+  exit 2
+}
+
+log "=== starting: RESULTS_DIR=$RESULTS_DIR ENABLE_GRPO=$ENABLE_GRPO N_CYCLES=$N_CYCLES START_CYCLE=$START_CYCLE ==="
 
 # ---- launch agent + user servers (idempotent: skip if already up) ----
 # (separate agent/user variants rather than a generic extra-env parameter --
@@ -107,7 +123,7 @@ start_user_server "$USER_GPU" "$USER_PORT"
 AGENT_BASE_URL="http://127.0.0.1:$AGENT_PORT/v1"
 USER_BASE_URL="http://127.0.0.1:$USER_PORT/v1"
 
-CURRENT_ADAPTER=""  # empty == base model, no adapter yet
+CURRENT_ADAPTER="$INITIAL_ADAPTER"  # empty == base model, no adapter yet
 
 # Always use vLLM's dynamic load/unload REST API (server started once, bare,
 # with --enable-lora --max-lora-rank 16, no --lora-modules) rather than
@@ -132,9 +148,9 @@ reload_agent() {
   log "agent adapter hot-swapped"
 }
 
-PREV_SKILLBOOK=""
+PREV_SKILLBOOK="$INITIAL_SKILLBOOK"
 
-for ((cycle=0; cycle<N_CYCLES; cycle++)); do
+for ((cycle=START_CYCLE; cycle<N_CYCLES; cycle++)); do
   OUT="$RESULTS_DIR/cycle_$cycle"
   mkdir -p "$OUT"
   log "== cycle $cycle =="
