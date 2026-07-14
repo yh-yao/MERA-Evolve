@@ -19,10 +19,11 @@ EXPERIMENT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 ROOT="$(cd "$EXPERIMENT_DIR/../.." && pwd)"
 TAU2_WORKSPACE="${TAU2_WORKSPACE:-/shared_home/yuhang.yao/router-skills-evolve}"
 TAU2_PY="${TAU2_PYTHON:-$TAU2_WORKSPACE/.venv_tau2/bin/python3}"
-MERA_PY="${MERA_PYTHON:-$ROOT/venv/bin/python3}"
-VLLM_BIN="${VLLM_BIN:-$ROOT/venv/bin/vllm}"
+TRAIN_VENV="${TRAIN_VENV:-$ROOT/venv}"
+MERA_PY="${MERA_PYTHON:-$TRAIN_VENV/bin/python3}"
+VLLM_BIN="${VLLM_BIN:-$TRAIN_VENV/bin/vllm}"
 export TAU2_WORKSPACE
-export PYTHONPATH="$EXPERIMENT_DIR:$ROOT/venv/lib/python3.12/site-packages:${PYTHONPATH:-}"
+export PYTHONPATH="$EXPERIMENT_DIR:$TRAIN_VENV/lib/python3.12/site-packages:${PYTHONPATH:-}"
 cd "$ROOT"
 
 RESULTS_DIR="${RESULTS_DIR:?set RESULTS_DIR}"
@@ -37,18 +38,60 @@ USER_PORT="${USER_PORT:?set USER_PORT}"
 ENABLE_GRPO="${ENABLE_GRPO:-0}"
 TRAIN_GPU="${TRAIN_GPU:-${GRPO_GPU:-}}"
 TRAIN_GPU="${TRAIN_GPU:?set TRAIN_GPU (the GPU used for SFT and optional GRPO)}"
+ROLLOUT_GPU="${ROLLOUT_GPU:-}"
 N_CYCLES="${N_CYCLES:-4}"
 START_CYCLE="${START_CYCLE:-0}"
 INITIAL_ADAPTER="${INITIAL_ADAPTER:-}"
 INITIAL_SKILLBOOK="${INITIAL_SKILLBOOK:-}"
-BASE_MODEL="Qwen/Qwen2.5-1.5B-Instruct"
-USER_MODEL_PATH="Qwen/Qwen2.5-3B-Instruct"
-DISTILLER_MODEL="openai/gpt-5.5"
-DISTILLER_BASE_URL="https://api.commonstack.ai/v1"
+BASE_MODEL="${BASE_MODEL:-Qwen/Qwen2.5-1.5B-Instruct}"
+USER_MODEL_PATH="${USER_MODEL_PATH:-Qwen/Qwen2.5-3B-Instruct}"
+DISTILLER_MODEL="${DISTILLER_MODEL:-openai/gpt-5.5}"
+DISTILLER_BASE_URL="${DISTILLER_BASE_URL:-https://api.commonstack.ai/v1}"
 TEACHER_MODEL="${TEACHER_MODEL:-openai/openai/gpt-5.5}"
 TEACHER_BASE_URL="${TEACHER_BASE_URL:-https://api.commonstack.ai/v1}"
 TEACHER_ATTEMPTS="${TEACHER_ATTEMPTS:-2}"
 COLLECT_MAX_STEPS="${COLLECT_MAX_STEPS:-40}"
+COLLECT_WORKERS="${COLLECT_WORKERS:-12}"
+EVAL_WORKERS="${EVAL_WORKERS:-$COLLECT_WORKERS}"
+AGENT_MAX_TOKENS="${AGENT_MAX_TOKENS:-}"
+GRPO_TOTAL_STEPS="${GRPO_TOTAL_STEPS:-10}"
+GRPO_TRAIN_BATCH_SIZE="${GRPO_TRAIN_BATCH_SIZE:-8}"
+GRPO_N_GENERATIONS="${GRPO_N_GENERATIONS:-4}"
+GRPO_ACTOR_LR="${GRPO_ACTOR_LR:-5e-6}"
+GRPO_MAX_RESPONSE_LENGTH="${GRPO_MAX_RESPONSE_LENGTH:-2048}"
+REUSE_EXISTING_ARTIFACTS="${REUSE_EXISTING_ARTIFACTS:-0}"
+SFT_MAX_LENGTH_DEFAULT=12288
+
+MODEL_ARGS=()
+THINKING_ARGS=()
+SFT_ARGS=()
+GRPO_ARGS=()
+AGENT_TOKEN_ARGS=()
+[[ -n "$AGENT_MAX_TOKENS" ]] && AGENT_TOKEN_ARGS=(--agent-max-tokens "$AGENT_MAX_TOKENS")
+if [[ "$BASE_MODEL" == *"Qwen3.5"* ]]; then
+  SFT_MAX_LENGTH_DEFAULT=24576
+  export PYTHONPATH="$EXPERIMENT_DIR/compat/qwen35_torch_fallback:$PYTHONPATH"
+  MODEL_ARGS=(--language-model-only --gdn-prefill-backend triton)
+  THINKING_ARGS=(--no-agent-thinking --no-user-thinking)
+  SFT_ARGS=(
+    SFT_ENABLE_THINKING=False
+    SFT_ATTN_IMPLEMENTATION=sdpa
+    SFT_DATASET_PATH="$EXPERIMENT_DIR/tau2_evolve/sft_dataset.py"
+    SFT_DATASET_NAME=Qwen35MultiTurnSFTDataset
+    SFT_MAX_TOKEN_LEN_PER_GPU=24576
+  )
+  GRPO_ARGS=(
+    TRAIN_VENV="$TRAIN_VENV"
+    AGENT_THINKING=False
+    MODEL_ATTN_IMPLEMENTATION=sdpa
+    USE_REMOVE_PADDING=False
+    ROLLOUT_TEMPERATURE=1.0
+    ROLLOUT_TOP_P=0.98
+    ROLLOUT_GPU_MEMORY_UTILIZATION=0.70
+    VLLM_GDN_PREFILL_BACKEND=triton
+    VLLM_LANGUAGE_MODEL_ONLY=True
+  )
+fi
 
 mkdir -p "$RESULTS_DIR"
 LOG="$RESULTS_DIR/pipeline.log"
@@ -64,6 +107,13 @@ if ! [[ "$START_CYCLE" =~ ^[0-9]+$ ]] || (( START_CYCLE >= N_CYCLES )); then
   log "FATAL: START_CYCLE must be an integer in [0, $((N_CYCLES - 1))] (got: $START_CYCLE)" >&2
   exit 2
 fi
+for worker_setting in COLLECT_WORKERS EVAL_WORKERS; do
+  worker_count="${!worker_setting}"
+  if ! [[ "$worker_count" =~ ^[1-9][0-9]*$ ]]; then
+    log "FATAL: $worker_setting must be a positive integer (got: $worker_count)" >&2
+    exit 2
+  fi
+done
 [[ -z "$INITIAL_ADAPTER" || -s "$INITIAL_ADAPTER/adapter_model.safetensors" ]] || {
   log "FATAL: INITIAL_ADAPTER is not a loadable LoRA adapter: $INITIAL_ADAPTER" >&2
   exit 2
@@ -92,7 +142,8 @@ start_agent_server() {
     --enable-lora --max-lora-rank 16 \
     --port "$port" --gpu-memory-utilization 0.5 --max-model-len 16384 \
     --dtype bfloat16 --trust-remote-code --enforce-eager \
-    --enable-auto-tool-choice --tool-call-parser hermes \
+    "${MODEL_ARGS[@]}" \
+    --enable-auto-tool-choice --tool-call-parser "${TOOL_CALL_PARSER:-hermes}" \
     > "$RESULTS_DIR/evol-llm-agent_server.log" 2>&1 &
   disown
   for _ in $(seq 1 40); do
@@ -118,7 +169,8 @@ start_user_server() {
     --served-model-name evol-llm-user \
     --port "$port" --gpu-memory-utilization 0.5 --max-model-len 16384 \
     --dtype bfloat16 --trust-remote-code --enforce-eager \
-    --enable-auto-tool-choice --tool-call-parser hermes \
+    "${MODEL_ARGS[@]}" \
+    --enable-auto-tool-choice --tool-call-parser "${TOOL_CALL_PARSER:-hermes}" \
     > "$RESULTS_DIR/evol-llm-user_server.log" 2>&1 &
   disown
   for _ in $(seq 1 40); do
@@ -175,31 +227,48 @@ for ((cycle=START_CYCLE; cycle<N_CYCLES; cycle++)); do
   # compounding effect shows up in what gets collected, not just at final eval.
   SKILL_ARG=()
   [[ -n "$PREV_SKILLBOOK" ]] && SKILL_ARG=(--skillbook "$PREV_SKILLBOOK")
-  log "collecting TRAIN traces (skillbook=${PREV_SKILLBOOK:-none})"
-  "$TAU2_PY" -m tau2_evolve.collect_traces \
-    --bucket TRAIN --workers 6 --max-steps "$COLLECT_MAX_STEPS" --probe-only \
-    --agent-model "openai/evol-llm-agent" --agent-base-url "$AGENT_BASE_URL" \
-    --user-model "openai/evol-llm-user" --user-base-url "$USER_BASE_URL" \
-    --fallback-agent-model "$TEACHER_MODEL" \
-    --fallback-agent-base-url "$TEACHER_BASE_URL" \
-    --fallback-attempts "$TEACHER_ATTEMPTS" \
-    "${SKILL_ARG[@]}" \
-    --out "$OUT/train_traces.jsonl" >> "$LOG" 2>&1
+  if [[ "$REUSE_EXISTING_ARTIFACTS" == "1" && -f "$OUT/train_traces.jsonl" && "$(wc -l < "$OUT/train_traces.jsonl")" -eq 97 ]]; then
+    log "reusing complete TRAIN traces: $OUT/train_traces.jsonl"
+  else
+    log "collecting TRAIN traces (skillbook=${PREV_SKILLBOOK:-none})"
+    "$TAU2_PY" -m tau2_evolve.collect_traces \
+      --bucket TRAIN --workers "$COLLECT_WORKERS" --max-steps "$COLLECT_MAX_STEPS" --probe-only \
+      --agent-model "openai/evol-llm-agent" --agent-base-url "$AGENT_BASE_URL" \
+      --user-model "openai/evol-llm-user" --user-base-url "$USER_BASE_URL" \
+      --fallback-agent-model "$TEACHER_MODEL" \
+      --fallback-agent-base-url "$TEACHER_BASE_URL" \
+      --fallback-attempts "$TEACHER_ATTEMPTS" \
+      "${AGENT_TOKEN_ARGS[@]}" \
+      "${THINKING_ARGS[@]}" \
+      "${SKILL_ARG[@]}" \
+      --out "$OUT/train_traces.jsonl" >> "$LOG" 2>&1
+  fi
 
   # 2. skillbook
-  log "building skillbook"
-  "$TAU2_PY" -m tau2_evolve.build_skillbook \
-    --traces "$OUT/train_traces.jsonl" --output "$OUT/skillbook.json" \
-    --distiller-model "$DISTILLER_MODEL" --distiller-base-url "$DISTILLER_BASE_URL" \
-    --api-key "$COMMONSTACK_API_KEY" >> "$LOG" 2>&1
+  if [[ "$REUSE_EXISTING_ARTIFACTS" == "1" && -s "$OUT/skillbook.json" ]]; then
+    log "reusing skillbook: $OUT/skillbook.json"
+  else
+    log "building skillbook"
+    "$TAU2_PY" -m tau2_evolve.build_skillbook \
+      --traces "$OUT/train_traces.jsonl" --output "$OUT/skillbook.json" \
+      --distiller-model "$DISTILLER_MODEL" --distiller-base-url "$DISTILLER_BASE_URL" \
+      --api-key "$COMMONSTACK_API_KEY" >> "$LOG" 2>&1
+  fi
 
   # 3. SFT (LoRA continuation from previous cycle's adapter, if any)
-  log "building SFT pairs"
-  "$MERA_PY" -m tau2_evolve.traces_to_sft \
-    --traces "$OUT/train_traces.jsonl" --output "$OUT/sft_pairs.parquet" >> "$LOG" 2>&1
+  if [[ "$REUSE_EXISTING_ARTIFACTS" == "1" && -s "$OUT/sft_pairs.parquet" ]]; then
+    log "reusing SFT pairs: $OUT/sft_pairs.parquet"
+  else
+    log "building SFT pairs"
+    "$MERA_PY" -m tau2_evolve.traces_to_sft \
+      --traces "$OUT/train_traces.jsonl" --output "$OUT/sft_pairs.parquet" >> "$LOG" 2>&1
+  fi
 
   SFT_ADAPTER="$OUT/sft_adapter"
-  if [[ -s "$OUT/sft_pairs.parquet" ]]; then
+  if [[ "$REUSE_EXISTING_ARTIFACTS" == "1" && -s "$SFT_ADAPTER/adapter_model.safetensors" ]]; then
+    log "reusing SFT adapter: $SFT_ADAPTER"
+    CURRENT_ADAPTER="$SFT_ADAPTER"
+  elif [[ -s "$OUT/sft_pairs.parquet" ]]; then
     log "training SFT (init_adapter=${CURRENT_ADAPTER:-none})"
     LORA_ARG=()
     [[ -n "$CURRENT_ADAPTER" ]] && LORA_ARG=(LORA_ADAPTER_PATH="$CURRENT_ADAPTER")
@@ -211,16 +280,20 @@ for ((cycle=START_CYCLE; cycle<N_CYCLES; cycle++)); do
     # silently resolves to system python (no `verl` installed), which
     # crashed both overnight pipelines identically on the first attempt
     # (ModuleNotFoundError: No module named 'verl', caught by set -e).
-    ( cd "$ROOT" && source venv/bin/activate && \
+    ( cd "$ROOT" && source "$TRAIN_VENV/bin/activate" && \
       env CUDA_VISIBLE_DEVICES="$TRAIN_GPU" \
+      PYTHON="$MERA_PY" \
       SFT_DATA="$OUT/sft_pairs.parquet" \
       SFT_OUTPUT_DIR="$SFT_ADAPTER" \
       MODEL_PATH="$BASE_MODEL" \
       "${LORA_ARG[@]}" \
-      SFT_BATCH_SIZE=4 SFT_MICRO_BATCH_SIZE_PER_GPU=2 SFT_TOTAL_EPOCHS=5 \
-      SFT_MAX_LENGTH=16384 \
+      SFT_BATCH_SIZE="${SFT_BATCH_SIZE:-2}" \
+      SFT_MICRO_BATCH_SIZE_PER_GPU="${SFT_MICRO_BATCH_SIZE_PER_GPU:-1}" \
+      SFT_TOTAL_EPOCHS="${SFT_TOTAL_EPOCHS:-3}" \
+      SFT_MAX_LENGTH="${SFT_MAX_LENGTH:-$SFT_MAX_LENGTH_DEFAULT}" \
+      "${SFT_ARGS[@]}" \
       SFT_PROJECT_NAME=tau2_4cycle SFT_EXPERIMENT_NAME="cycle${cycle}_$(basename "$RESULTS_DIR")" \
-      bash scripts/train_sft.sh data.max_token_len_per_gpu=16384 data.num_workers=0 ) >> "$LOG" 2>&1
+      bash scripts/train_sft.sh data.num_workers=0 ) >> "$LOG" 2>&1
     CURRENT_ADAPTER="$SFT_ADAPTER"
   else
     log "no SFT pairs this cycle (no successful trajectories) -- skipping SFT"
@@ -228,23 +301,47 @@ for ((cycle=START_CYCLE; cycle<N_CYCLES; cycle++)); do
 
   # 4. GRPO (continues training CURRENT_ADAPTER further, only if enabled)
   if [[ "$ENABLE_GRPO" == "1" && -n "$CURRENT_ADAPTER" ]]; then
-    log "GRPO training (continuing from $CURRENT_ADAPTER)"
-    reload_agent "$CURRENT_ADAPTER"  # keep the external eval server in sync
     GRPO_OUT="$OUT/verl_grpo"
     VERL_DATA="$OUT/verl_grpo.parquet"
-    "$MERA_PY" -m tau2_evolve.prepare_grpo_data \
-      --traces "$OUT/train_traces.jsonl" --skillbook "$OUT/skillbook.json" \
-      --user-base-url "$USER_BASE_URL" --output "$VERL_DATA" >> "$LOG" 2>&1
-    ( cd "$ROOT" && \
-      env CUDA_VISIBLE_DEVICES="$TRAIN_GPU" TRAIN_FILE="$VERL_DATA" \
-      OUTPUT_DIR="$GRPO_OUT" MODEL_PATH="$BASE_MODEL" \
-      LORA_ADAPTER_PATH="$CURRENT_ADAPTER" TOTAL_STEPS=10 \
-      EXPERIMENT_NAME="cycle${cycle}_$(basename "$RESULTS_DIR")" \
-      bash experiments/tau-2/scripts/train_verl_grpo.sh ) >> "$LOG" 2>&1
-    CURRENT_ADAPTER="$(<"$GRPO_OUT/final_adapter_path.txt")"
-    if [[ ! -s "$CURRENT_ADAPTER/adapter_model.safetensors" ]]; then
-      log "FATAL: verl GRPO adapter is missing: $CURRENT_ADAPTER"
-      exit 1
+    REUSED_GRPO_ADAPTER=""
+    if [[ "$REUSE_EXISTING_ARTIFACTS" == "1" && -s "$GRPO_OUT/final_adapter_path.txt" ]]; then
+      REUSED_GRPO_ADAPTER="$(<"$GRPO_OUT/final_adapter_path.txt")"
+      [[ -s "$REUSED_GRPO_ADAPTER/adapter_model.safetensors" ]] || REUSED_GRPO_ADAPTER=""
+    fi
+    if [[ -n "$REUSED_GRPO_ADAPTER" ]]; then
+      CURRENT_ADAPTER="$REUSED_GRPO_ADAPTER"
+      log "reusing GRPO adapter: $CURRENT_ADAPTER"
+    else
+      log "GRPO training (continuing from $CURRENT_ADAPTER)"
+      reload_agent "$CURRENT_ADAPTER"  # keep the external eval server in sync
+      "$MERA_PY" -m tau2_evolve.prepare_grpo_data \
+        --traces "$OUT/train_traces.jsonl" --skillbook "$OUT/skillbook.json" \
+        --user-base-url "$USER_BASE_URL" "${THINKING_ARGS[@]:1}" \
+        --output "$VERL_DATA" >> "$LOG" 2>&1
+      CUDA_DEVICES="$TRAIN_GPU"
+      SEPARATION_ARGS=()
+      if [[ -n "$ROLLOUT_GPU" ]]; then
+        CUDA_DEVICES="$TRAIN_GPU,$ROLLOUT_GPU"
+        SEPARATION_ARGS=(
+          SEPARATE_ROLLOUT=1 ROLLOUT_N_GPUS=1 RAY_NUM_CPUS=24
+          CHECKPOINT_BACKEND=nixl_tau2
+          CHECKPOINT_CUSTOM_BACKEND_MODULE=tau2_evolve.nixl_checkpoint
+        )
+      fi
+      ( cd "$ROOT" && \
+        env CUDA_VISIBLE_DEVICES="$CUDA_DEVICES" TRAIN_FILE="$VERL_DATA" \
+        OUTPUT_DIR="$GRPO_OUT" MODEL_PATH="$BASE_MODEL" \
+        LORA_ADAPTER_PATH="$CURRENT_ADAPTER" TOTAL_STEPS="$GRPO_TOTAL_STEPS" \
+        TRAIN_BATCH_SIZE="$GRPO_TRAIN_BATCH_SIZE" N_GENERATIONS="$GRPO_N_GENERATIONS" \
+        ACTOR_LR="$GRPO_ACTOR_LR" MAX_RESPONSE_LENGTH="$GRPO_MAX_RESPONSE_LENGTH" \
+        "${GRPO_ARGS[@]}" "${SEPARATION_ARGS[@]}" \
+        EXPERIMENT_NAME="cycle${cycle}_$(basename "$RESULTS_DIR")" \
+        bash experiments/tau-2/scripts/train_verl_grpo.sh data.shuffle=False ) >> "$LOG" 2>&1
+      CURRENT_ADAPTER="$(<"$GRPO_OUT/final_adapter_path.txt")"
+      if [[ ! -s "$CURRENT_ADAPTER/adapter_model.safetensors" ]]; then
+        log "FATAL: verl GRPO adapter is missing: $CURRENT_ADAPTER"
+        exit 1
+      fi
     fi
   fi
 
@@ -252,13 +349,19 @@ for ((cycle=START_CYCLE; cycle<N_CYCLES; cycle++)); do
   if [[ -n "$CURRENT_ADAPTER" ]]; then
     reload_agent "$CURRENT_ADAPTER"
   fi
-  log "held-out EVAL (35 tasks)"
-  "$TAU2_PY" -m tau2_evolve.collect_traces \
-    --bucket EVAL --workers 6 --max-steps 60 \
-    --agent-model "openai/evol-llm-agent" --agent-base-url "$AGENT_BASE_URL" \
-    --user-model "openai/evol-llm-user" --user-base-url "$USER_BASE_URL" \
-    --skillbook "$OUT/skillbook.json" \
-    --out "$OUT/eval.jsonl" >> "$LOG" 2>&1
+  if [[ "$REUSE_EXISTING_ARTIFACTS" == "1" && -f "$OUT/eval.jsonl" && "$(wc -l < "$OUT/eval.jsonl")" -eq 35 ]]; then
+    log "reusing complete held-out EVAL: $OUT/eval.jsonl"
+  else
+    log "held-out EVAL (35 tasks)"
+    "$TAU2_PY" -m tau2_evolve.collect_traces \
+      --bucket EVAL --workers "$EVAL_WORKERS" --max-steps 60 \
+      --agent-model "openai/evol-llm-agent" --agent-base-url "$AGENT_BASE_URL" \
+      --user-model "openai/evol-llm-user" --user-base-url "$USER_BASE_URL" \
+      "${AGENT_TOKEN_ARGS[@]}" \
+      "${THINKING_ARGS[@]}" \
+      --skillbook "$OUT/skillbook.json" \
+      --out "$OUT/eval.jsonl" >> "$LOG" 2>&1
+  fi
 
   "$MERA_PY" - "$OUT/eval.jsonl" <<'PYEOF' >> "$LOG" 2>&1
 import json, sys
