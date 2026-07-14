@@ -11,9 +11,10 @@ import pandas as pd
 TAU2_EXPERIMENT = Path(__file__).parents[1] / "experiments" / "tau-2"
 sys.path.insert(0, str(TAU2_EXPERIMENT))
 
-from tau2_evolve import benchmark, traces_to_sft  # noqa: E402
+from tau2_evolve import benchmark, prepare_grpo_data, traces_to_sft  # noqa: E402
 from tau2_evolve.interaction import Tau2Interaction  # noqa: E402
 from tau2_evolve.skills import SkillBook  # noqa: E402
+from verl_code_rl.extract_sft_lora_adapter import _normalize_checkpoint_keys
 
 
 def test_action_completion_accepts_shorter_valid_read_path() -> None:
@@ -77,6 +78,16 @@ def test_trace_with_explicitly_empty_action_requirements_is_complete() -> None:
     )
 
 
+def test_qwen_thinking_flag_is_forwarded_to_chat_template() -> None:
+    spec = benchmark.make_llm_spec(
+        "openai/qwen3", "http://localhost:8000/v1", enable_thinking=False
+    )
+
+    assert spec.args["extra_body"] == {
+        "chat_template_kwargs": {"enable_thinking": False}
+    }
+
+
 def test_verl_state_evaluator_is_an_instance_method() -> None:
     parameters = list(inspect.signature(Tau2Interaction._evaluate_state).parameters)
     assert parameters[0] == "self"
@@ -127,6 +138,62 @@ def test_sft_domain_balancing_is_deterministic() -> None:
         "retail": 2,
         "telecom": 2,
     }
+
+
+def test_grpo_domain_balancing_is_interleaved() -> None:
+    rows = [
+        {"ability": "retail", "id": "r0"},
+        {"ability": "airline", "id": "a0"},
+        {"ability": "airline", "id": "a1"},
+        {"ability": "telecom", "id": "t0"},
+    ]
+
+    balanced = prepare_grpo_data.balance_and_interleave_domains(rows)
+
+    assert [row["ability"] for row in balanced] == [
+        "airline", "retail", "telecom", "airline", "retail", "telecom"
+    ]
+    assert [row["id"] for row in balanced] == ["a0", "r0", "t0", "a1", "r0", "t0"]
+
+
+def test_sft_drops_only_assistant_messages_before_first_user() -> None:
+    messages = [
+        {"role": "system", "content": "policy"},
+        {"role": "assistant", "content": "generic greeting"},
+        {"role": "user", "content": "task"},
+        {"role": "assistant", "content": "decision"},
+    ]
+
+    cleaned = traces_to_sft._drop_pre_user_assistant_messages(messages)
+
+    assert [message["content"] for message in cleaned] == ["policy", "task", "decision"]
+
+
+def test_sft_requires_a_nonempty_assistant_target() -> None:
+    assert not traces_to_sft._has_assistant_target([
+        {"role": "system", "content": "policy"},
+        {"role": "user", "content": "task"},
+    ])
+    assert traces_to_sft._has_assistant_target([
+        {"role": "assistant", "content": "decision"},
+    ])
+
+
+def test_sft_adapter_export_maps_qwen35_language_model_keys() -> None:
+    source_key = (
+        "base_model.model.model.language_model.layers.0.self_attn.q_proj."
+        "lora_A.default.weight"
+    )
+    target_key = (
+        "base_model.model.model.layers.0.self_attn.q_proj.lora_A.default.weight"
+    )
+
+    normalized, remapped = _normalize_checkpoint_keys(
+        {source_key: "weight"}, {target_key}
+    )
+
+    assert normalized == {target_key: "weight"}
+    assert remapped == 1
 
 
 def test_telecom_skill_covers_policy_mobile_data_branches() -> None:

@@ -72,6 +72,30 @@ def _merge_consecutive_tool_messages(messages: list[dict]) -> list[dict]:
     return merged
 
 
+def _drop_pre_user_assistant_messages(messages: list[dict]) -> list[dict]:
+    """Drop TAU's generic agent greeting before the simulator's first request.
+
+    Qwen3.5 requires a user query before an assistant turn. The greeting is
+    fixed orchestration boilerplate rather than a task decision, so it should
+    not be an imitation target.
+    """
+    first_user = next(
+        (index for index, message in enumerate(messages) if message["role"] == "user"),
+        len(messages),
+    )
+    return [
+        message for index, message in enumerate(messages)
+        if index >= first_user or message["role"] != "assistant"
+    ]
+
+
+def _has_assistant_target(messages: list[dict]) -> bool:
+    return any(
+        message["role"] == "assistant" and str(message.get("content") or "").strip()
+        for message in messages
+    )
+
+
 def _clean_message(m: dict) -> dict:
     tool_calls = m.get("tool_calls")
     out = {"role": m["role"], "content": m.get("content") or ""}
@@ -131,6 +155,7 @@ def main() -> int:
     rows_out = []
     n_total = 0
     n_incomplete = 0
+    n_without_target = 0
     for traces_path in args.traces:
         for line in traces_path.read_text().splitlines():
             if not line.strip():
@@ -145,7 +170,11 @@ def main() -> int:
             system_content = row["system_prompt"] + _render_tools_block(row.get("tools", []))
             messages = [{"role": "system", "content": system_content}]
             messages.extend(_clean_message(m) for m in row.get("messages", []))
+            messages = _drop_pre_user_assistant_messages(messages)
             messages = _merge_consecutive_tool_messages(messages)
+            if not _has_assistant_target(messages):
+                n_without_target += 1
+                continue
             # Loss is masked by role=="assistant" regardless of which model actually
             # generated the turn -- so in a fallback-rescued row (agent+user both
             # played by the fallback model), only the assistant-side turns become
@@ -169,7 +198,8 @@ def main() -> int:
     print(
         f"[traces_to_sft] {n_unbalanced}/{n_total} trajectories passed -> SFT rows "
         f"({n_unbalanced - n_fallback} main-success, {n_fallback} fallback-rescued/teacher; "
-        f"excluded {n_incomplete} passed but action-incomplete)"
+        f"excluded {n_incomplete} passed but action-incomplete and "
+        f"{n_without_target} without assistant targets)"
     )
     if args.balance_domains:
         print(f"[traces_to_sft] domain-balanced {n_unbalanced} -> {len(rows_out)} rows")

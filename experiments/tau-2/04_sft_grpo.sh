@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Multi-cycle SkillBook + SFT + verl GRPO experiment.
+# Multi-cycle SkillBook + SFT + verl GRPO experiment. Use 03_grpo_only.sh for
+# the strict GRPO ablation without either SkillBook or SFT initialization.
 #
 # Required environment:
 #   AGENT_GPU, AGENT_PORT, USER_GPU, USER_PORT, TRAIN_GPU

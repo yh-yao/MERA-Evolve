@@ -23,6 +23,23 @@ def _parse_target_modules(raw: str) -> list[str]:
     return [m.strip() for m in raw.strip("[]").split(",") if m.strip()]
 
 
+def _normalize_checkpoint_keys(
+    state_dict: dict[str, object], model_keys: set[str]
+) -> tuple[dict[str, object], int]:
+    """Map multimodal Qwen checkpoints onto their text-only PEFT model."""
+    normalized: dict[str, object] = {}
+    remapped = 0
+    for key, value in state_dict.items():
+        target_key = key
+        if key not in model_keys and ".language_model." in key:
+            candidate = key.replace(".language_model.", ".", 1)
+            if candidate in model_keys:
+                target_key = candidate
+                remapped += 1
+        normalized[target_key] = value
+    return normalized, remapped
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint-dir", required=True, help="e.g. .../verl_checkpoints/global_step_3")
@@ -58,6 +75,9 @@ def main() -> int:
     ))
 
     state_dict = torch.load(shard, map_location="cpu", weights_only=False)
+    state_dict, remapped = _normalize_checkpoint_keys(
+        state_dict, set(peft_model.state_dict())
+    )
     missing, unexpected = peft_model.load_state_dict(state_dict, strict=False)
     trainable = {n for n, p in peft_model.named_parameters() if p.requires_grad}
     missing_trainable = [m for m in missing if m in trainable]
@@ -67,7 +87,10 @@ def main() -> int:
             f"the checkpoint (e.g. {missing_trainable[:5]}) -- key naming "
             "assumption doesn't match this checkpoint's state dict."
         )
-    print(f"[extract_sft_lora_adapter] loaded checkpoint ({len(unexpected)} unexpected keys ignored)")
+    print(
+        "[extract_sft_lora_adapter] loaded checkpoint "
+        f"({remapped} keys remapped, {len(unexpected)} unexpected keys ignored)"
+    )
 
     Path(args.output).mkdir(parents=True, exist_ok=True)
     peft_model.save_pretrained(args.output)

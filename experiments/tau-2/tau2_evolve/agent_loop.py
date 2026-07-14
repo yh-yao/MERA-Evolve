@@ -1,26 +1,153 @@
 """Tau2 specialization of verl's native multi-turn ToolAgentLoop."""
-from verl.experimental.agent_loop.agent_loop import register
-from verl.experimental.agent_loop.tool_agent_loop import AgentState, ToolAgentLoop
+import json
+from uuid import uuid4
+
+from verl.experimental.agent_loop.agent_loop import AgentLoopOutput, register
+from verl.experimental.agent_loop.tool_agent_loop import AgentData, AgentState, ToolAgentLoop
+
+from tau2_evolve.interaction import Tau2Interaction
+
+
+_INTERACTING = object()
 
 
 @register("tau2_agent")
 class Tau2AgentLoop(ToolAgentLoop):
+    """Drive TAU-2 interactions on VERL versions without ``verl.interactions``.
+
+    VERL 0.8 removed its generic interaction registry from ToolAgentLoop. TAU-2
+    still needs an environment turn after every assistant generation, so this
+    subclass restores that one state while retaining VERL's current rollout,
+    token accounting, and tool parser implementation.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.interaction = Tau2Interaction({"official_reward_weight": 0.5})
+
+    async def run(self, sampling_params: dict, **kwargs):
+        messages = list(kwargs["raw_prompt"])
+        multi_modal_data = await self.process_multi_modal_info(messages)
+        images = multi_modal_data.get("images")
+        videos = multi_modal_data.get("videos")
+        audios = multi_modal_data.get("audios")
+        request_id = uuid4().hex
+        interaction_kwargs = (kwargs.get("extra_info") or {}).get("interaction_kwargs", {})
+        await self.interaction.start_interaction(request_id, **interaction_kwargs)
+
+        agent_data = AgentData(
+            messages=messages,
+            image_data=images,
+            video_data=videos,
+            audio_data=audios,
+            mm_processor_kwargs=self._get_mm_processor_kwargs(audios),
+            metrics={},
+            request_id=request_id,
+            tools_kwargs=kwargs.get("tools_kwargs", {}),
+        )
+        agent_data.interaction = self.interaction
+        agent_data.interaction_kwargs = interaction_kwargs
+
+        extra_info = kwargs.get("extra_info", {}) or {}
+        tool_selection = extra_info.get("tool_selection")
+        if tool_selection and self.tools:
+            selected = {name: self.tools[name] for name in tool_selection if name in self.tools}
+            agent_data._active_tools = selected
+            agent_data._active_tool_schemas = [
+                tool.tool_schema.model_dump(exclude_unset=True, exclude_none=True)
+                for tool in selected.values()
+            ]
+        else:
+            agent_data._active_tools = self.tools
+            agent_data._active_tool_schemas = self.tool_schemas
+
+        state = AgentState.PENDING
+        while state != AgentState.TERMINATED:
+            if state == AgentState.PENDING:
+                state = await self._handle_pending_state(agent_data, sampling_params)
+            elif state == AgentState.GENERATING:
+                state = await self._handle_generating_state(agent_data, sampling_params)
+            elif state is _INTERACTING:
+                state = await self._handle_interacting_state(agent_data)
+            else:
+                reward = await self.interaction.force_terminate(request_id)
+                agent_data.turn_scores.append(reward)
+                await self.interaction.finalize_interaction(request_id)
+                state = AgentState.TERMINATED
+
+        response_ids = agent_data.prompt_ids[-len(agent_data.response_mask) :]
+        prompt_ids = agent_data.prompt_ids[: len(agent_data.prompt_ids) - len(agent_data.response_mask)]
+        output_multi_modal_data = {}
+        if agent_data.image_data is not None:
+            output_multi_modal_data["images"] = agent_data.image_data
+        if agent_data.video_data is not None:
+            output_multi_modal_data["videos"] = agent_data.video_data
+        if agent_data.audio_data is not None:
+            output_multi_modal_data["audios"] = agent_data.audio_data
+
+        output = AgentLoopOutput(
+            prompt_ids=prompt_ids,
+            response_ids=response_ids[: self.response_length],
+            response_mask=agent_data.response_mask[: self.response_length],
+            multi_modal_data=output_multi_modal_data,
+            mm_processor_kwargs=agent_data.mm_processor_kwargs,
+            response_logprobs=(
+                agent_data.response_logprobs[: self.response_length]
+                if agent_data.response_logprobs
+                else None
+            ),
+            num_turns=agent_data.user_turns + agent_data.assistant_turns + 1,
+            metrics=agent_data.metrics,
+            routed_experts=(
+                agent_data.routed_experts[: len(prompt_ids) + self.response_length]
+                if agent_data.routed_experts is not None
+                else None
+            ),
+            extra_fields=agent_data.extra_fields,
+        )
+        output.extra_fields.update(
+            {"turn_scores": agent_data.turn_scores, "tool_rewards": agent_data.tool_rewards}
+        )
+        output.reward_score = float(sum(agent_data.turn_scores))
+        return output
+
     async def _handle_generating_state(self, agent_data, sampling_params, ignore_termination=False):
-        state = await super()._handle_generating_state(agent_data, sampling_params, ignore_termination)
-        if state == AgentState.TERMINATED and agent_data.interaction is not None:
-            reward = await agent_data.interaction.force_terminate(agent_data.request_id)
+        state = await super()._handle_generating_state(
+            agent_data, sampling_params, ignore_termination=ignore_termination
+        )
+        if agent_data.tool_calls:
+            call = agent_data.tool_calls[0]
+            try:
+                arguments = json.loads(call.arguments)
+            except json.JSONDecodeError:
+                arguments = call.arguments
+            assistant_message = "<tool_call>\n" + json.dumps(
+                {"name": call.name, "arguments": arguments}, ensure_ascii=False
+            ) + "\n</tool_call>"
+        else:
+            assistant_message = await self.loop.run_in_executor(
+                None, lambda: self.tokenizer.decode(agent_data.response_ids, skip_special_tokens=True)
+            )
+        agent_data.messages.append({"role": "assistant", "content": assistant_message})
+
+        reached_limit = (
+            len(agent_data.response_mask) >= self.response_length
+            or bool(self.max_assistant_turns and agent_data.assistant_turns >= self.max_assistant_turns)
+            or bool(self.max_user_turns and agent_data.user_turns >= self.max_user_turns)
+        )
+        if reached_limit:
+            reward = await self.interaction.force_terminate(agent_data.request_id)
             agent_data.turn_scores.append(reward)
-            await agent_data.interaction.finalize_interaction(agent_data.request_id)
-        if state == AgentState.PROCESSING_TOOLS:
-            # Tau2Interaction owns task-specific tool execution. The schemas
-            # vary by domain, so do not route calls through verl's static tool
-            # registry; pass the decoded assistant turn to the interaction.
-            agent_data.tool_calls = []
-            return AgentState.INTERACTING
-        return state
+            await self.interaction.finalize_interaction(agent_data.request_id)
+            return AgentState.TERMINATED
+
+        # Tau2Interaction owns task-specific tool execution. Tool schemas vary
+        # by domain, so every generated assistant turn goes to the environment.
+        agent_data.tool_calls = []
+        return _INTERACTING
 
     async def _handle_interacting_state(self, agent_data):
-        terminate, response, reward, extra = await agent_data.interaction.generate_response(
+        terminate, response, reward, extra = await self.interaction.generate_response(
             agent_data.request_id, agent_data.messages, **agent_data.interaction_kwargs
         )
         agent_data.user_turns += 1
@@ -36,14 +163,6 @@ class Tau2AgentLoop(ToolAgentLoop):
             if agent_data.response_logprobs:
                 agent_data.response_logprobs += [0.0] * len(response_ids)
         if terminate:
-            await agent_data.interaction.finalize_interaction(agent_data.request_id)
+            await self.interaction.finalize_interaction(agent_data.request_id)
             return AgentState.TERMINATED
         return AgentState.GENERATING
-
-    async def run(self, sampling_params: dict, **kwargs):
-        output = await super().run(sampling_params, **kwargs)
-        scores = output.extra_fields.get("turn_scores") or []
-        # Tau2Interaction emits zero for intermediate turns and the official
-        # terminal environment score on the final turn.
-        output.reward_score = float(sum(scores))
-        return output

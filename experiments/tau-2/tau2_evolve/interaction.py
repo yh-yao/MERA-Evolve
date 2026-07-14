@@ -6,6 +6,7 @@ import re
 import sys
 import time
 from typing import Any, Optional
+from uuid import uuid4
 
 # Append (do not prepend) tau2's venv so optional voice dependencies missing
 # from MERA's venv resolve without overriding verl's transformers/tokenizers.
@@ -14,12 +15,11 @@ if tau2_site_packages and tau2_site_packages not in sys.path:
     sys.path.append(tau2_site_packages)
 
 from tau2_evolve import benchmark
-from verl.interactions.base import BaseInteraction
 
 
-class Tau2Interaction(BaseInteraction):
+class Tau2Interaction:
     def __init__(self, config: dict[str, Any]):
-        super().__init__(config)
+        self.config = config
         self._instances: dict[str, dict[str, Any]] = {}
         self._official_reward_weight = float(config.get("official_reward_weight", 0.5))
 
@@ -32,6 +32,7 @@ class Tau2Interaction(BaseInteraction):
         max_steps: int = 40,
         user_model: str = "openai/evol-llm-user",
         user_base_url: str = "http://127.0.0.1:8211/v1",
+        user_thinking: bool | None = None,
         skill_text: str = "",
         expected_initial_user: str = "",
         **_: Any,
@@ -44,9 +45,11 @@ class Tau2Interaction(BaseInteraction):
         from tau2.runner import build_text_orchestrator
         from tau2.utils.utils import get_now
 
-        instance_id = instance_id or await super().start_interaction()
+        instance_id = instance_id or uuid4().hex
         task = Task.model_validate(benchmark.load_task(domain, str(task_id)))
-        user_spec = benchmark.make_llm_spec(user_model, user_base_url)
+        user_spec = benchmark.make_llm_spec(
+            user_model, user_base_url, enable_thinking=user_thinking
+        )
         # The agent object is only used to construct policy/tools and is never
         # asked to generate; verl owns every assistant generation.
         agent_spec = benchmark.make_llm_spec("openai/evol-llm-agent", "http://127.0.0.1:1/v1")

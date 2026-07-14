@@ -1,0 +1,59 @@
+# Isolated Qwen3.5 VERL/vLLM environment for the CUDA 12.9 node.
+# Install vLLM first so pip does not select the CUDA 13 build of PyTorch:
+#   python3 -m venv .venv_qwen35
+#   .venv_qwen35/bin/pip install vllm==0.17.1 verl==0.8.0
+#   .venv_qwen35/bin/pip install --no-deps \
+#       vllm==0.18.1 flashinfer-python==0.6.6 xgrammar==0.2.3
+#   .venv_qwen35/bin/pip install cupy-cuda12x==13.6.0
+#   .venv_qwen35/bin/pip install nixl==1.2.0
+#   .venv_qwen35/bin/pip install numpy==1.26.4
+#   MAX_JOBS=8 .venv_qwen35/bin/pip install --no-build-isolation \
+#       fla-core==0.5.1 causal-conv1d==1.6.2.post1
+#   .venv_qwen35/bin/pip install --no-deps \
+#       transformers==5.13.1 huggingface-hub==1.23.0
+#   .venv_qwen35/bin/pip install --no-deps opencv-python-headless==4.13.0.92
+#   .venv_qwen35/bin/pip install --no-deps --target .deps/qwen35-triton33 \
+#       triton==3.3.1
+#
+# vLLM 0.18.1 adds the Qwen3.5 `--gdn-prefill-backend triton` switch. Use it
+# on this H100 node; the FlashInfer 0.6.x GDN prefill kernel misreads the CUDA
+# device version here. The no-deps upgrade keeps VERL's tested dependency set.
+# Transformers 5 is required for the Qwen3.5 training model implementation;
+# vLLM serves Qwen3.5 through its own model implementation and was smoke-tested
+# with this combination despite its conservative transformers<5 metadata.
+# Qwen3.5's FLA backward pass currently rejects Triton 3.6 on H100. Prefix
+# training commands with `PYTHONPATH=$PWD/.deps/qwen35-triton33:$PYTHONPATH`
+# and `FLA_TILELANG=0`; do not apply this overlay to vLLM serving processes.
+# For colocated VERL GRPO, keep Triton 3.6 for vLLM and instead prefix
+# `PYTHONPATH=$PWD/experiments/tau-2/compat/qwen35_torch_fallback:$PYTHONPATH`.
+# This selects Transformers' slower, correct torch GDN backward path because
+# FLA rejects Triton >=3.4 gradients on Hopper.
+#
+# The NVIDIA driver exposes CUDA 12.9 while this node's nvcc is 13.0. The
+# prebuilt PyTorch cu128 wheel is driver-compatible and avoids mixing CUDA 13
+# packages into VERL/vLLM. Be careful when compiling additional CUDA extensions:
+# they will otherwise pick up the system nvcc 13.0 toolchain.
+# vLLM 0.18.1 requires OpenCV >=4.13, which declares numpy>=2 on Python 3.12,
+# while VERL 0.8 requires numpy<2. This is an upstream metadata conflict with no
+# fully satisfiable version set. Keep NumPy 1.26 for VERL and install OpenCV
+# 4.13 with --no-deps; cv2 and text-only vLLM were smoke-tested successfully.
+# The list below records tested versions; do not feed it to a fresh resolver.
+torch==2.10.0
+torchaudio==2.10.0
+torchvision==0.25.0
+vllm==0.18.1
+verl==0.8.0
+flashinfer-python==0.6.6
+xgrammar==0.2.3
+transformers==5.13.1
+huggingface-hub==1.23.0
+fla-core==0.5.1
+causal-conv1d==1.6.2.post1
+numpy==1.26.4
+cupy-cuda12x==13.6.0
+nixl==1.2.0
+ray==2.56.0
+tensordict==0.10.0
+datasets==5.0.0
+pyarrow==25.0.0
+opencv-python-headless==4.13.0.92

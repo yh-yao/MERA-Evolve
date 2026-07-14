@@ -19,21 +19,47 @@ def first_user_message(row: dict) -> str:
     raise ValueError(f"trace {row.get('domain')}/{row.get('task_id')} has no user message")
 
 
+def balance_and_interleave_domains(rows: list[dict]) -> list[dict]:
+    """Repeat minority domains and emit a deterministic round-robin order."""
+    counts = Counter(row["ability"] for row in rows)
+    if not counts:
+        return []
+    target = max(counts.values())
+    by_domain = {
+        domain: [row for row in rows if row["ability"] == domain]
+        for domain in sorted(counts)
+    }
+    return [
+        by_domain[domain][index % len(by_domain[domain])]
+        for index in range(target)
+        for domain in by_domain
+    ]
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--traces", type=Path, required=True)
-    ap.add_argument("--skillbook", type=Path, required=True)
+    ap.add_argument(
+        "--skillbook", type=Path,
+        help="Optional SkillBook JSON. Omit it for a strict GRPO-only run.",
+    )
     ap.add_argument("--output", type=Path, required=True)
     ap.add_argument("--user-base-url", default="http://127.0.0.1:8211/v1")
+    ap.add_argument(
+        "--user-thinking", action=argparse.BooleanOptionalAction, default=None,
+        help="Enable or disable thinking for the user simulator chat template.",
+    )
     ap.add_argument("--seed", type=int, default=300)
     ap.add_argument("--max-steps", type=int, default=12)
     ap.add_argument(
         "--balance-domains", action=argparse.BooleanOptionalAction, default=True,
-        help="Repeat minority-domain tasks so each domain has equal sampling weight.",
+        help="Repeat minority domains and interleave them in deterministic round-robin order.",
     )
     args = ap.parse_args()
-    skills = json.loads(args.skillbook.read_text())
-    user_spec = benchmark.make_llm_spec("openai/evol-llm-user", args.user_base_url)
+    skills = json.loads(args.skillbook.read_text()) if args.skillbook else {}
+    user_spec = benchmark.make_llm_spec(
+        "openai/evol-llm-user", args.user_base_url, enable_thinking=args.user_thinking
+    )
     contexts: dict[str, tuple[str, list[dict]]] = {}
     rows = []
     skipped = 0
@@ -68,6 +94,7 @@ def main() -> None:
                     "name": "tau2", "domain": trace["domain"], "task_id": str(trace["task_id"]),
                     "seed": args.seed, "max_steps": args.max_steps,
                     "user_model": "openai/evol-llm-user", "user_base_url": args.user_base_url,
+                    "user_thinking": args.user_thinking,
                     "skill_text": skills.get(domain, ""),
                     "expected_initial_user": initial_user,
                 },
@@ -75,12 +102,7 @@ def main() -> None:
         })
     raw_counts = Counter(row["ability"] for row in rows)
     if args.balance_domains and raw_counts:
-        target = max(raw_counts.values())
-        balanced = []
-        for domain in sorted(raw_counts):
-            domain_rows = [row for row in rows if row["ability"] == domain]
-            balanced.extend(domain_rows[i % len(domain_rows)] for i in range(target))
-        rows = balanced
+        rows = balance_and_interleave_domains(rows)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     datasets.Dataset.from_list(rows).to_parquet(str(args.output))
     print(

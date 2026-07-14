@@ -22,9 +22,14 @@ N_GPUS="${N_GPUS:-1}"
 SFT_BATCH_SIZE="${SFT_BATCH_SIZE:-16}"
 SFT_MICRO_BATCH_SIZE_PER_GPU="${SFT_MICRO_BATCH_SIZE_PER_GPU:-8}"
 SFT_MAX_LENGTH="${SFT_MAX_LENGTH:-2048}"
+SFT_MAX_TOKEN_LEN_PER_GPU="${SFT_MAX_TOKEN_LEN_PER_GPU:-$SFT_MAX_LENGTH}"
 SFT_LR="${SFT_LR:-1e-4}"
 SFT_TOTAL_EPOCHS="${SFT_TOTAL_EPOCHS:-3}"
 SFT_SAVE_FREQ="${SFT_SAVE_FREQ:--1}"
+SFT_ENABLE_THINKING="${SFT_ENABLE_THINKING:-}"
+SFT_ATTN_IMPLEMENTATION="${SFT_ATTN_IMPLEMENTATION:-}"
+SFT_DATASET_PATH="${SFT_DATASET_PATH:-}"
+SFT_DATASET_NAME="${SFT_DATASET_NAME:-Qwen35MultiTurnSFTDataset}"
 SFT_PROJECT_NAME="${SFT_PROJECT_NAME:-verl_code_rl_sft}"
 SFT_EXPERIMENT_NAME="${SFT_EXPERIMENT_NAME:-sft}"
 
@@ -39,6 +44,7 @@ LORA_TARGET_MODULES="${LORA_TARGET_MODULES:-[q_proj,k_proj,v_proj,o_proj]}"
 LORA_ADAPTER_PATH="${LORA_ADAPTER_PATH:-}"
 
 LORA_ARGS=()
+CONFIG_ARGS=()
 if [[ "$LORA_RANK" -gt 0 ]]; then
   LORA_ARGS=(
     model.lora_rank="$LORA_RANK"
@@ -46,6 +52,13 @@ if [[ "$LORA_RANK" -gt 0 ]]; then
     model.target_modules="$LORA_TARGET_MODULES"
   )
   [[ -n "$LORA_ADAPTER_PATH" ]] && LORA_ARGS+=(model.lora_adapter_path="$LORA_ADAPTER_PATH")
+fi
+[[ -n "$SFT_ENABLE_THINKING" ]] && \
+  CONFIG_ARGS+=(+data.apply_chat_template_kwargs.enable_thinking="$SFT_ENABLE_THINKING")
+[[ -n "$SFT_ATTN_IMPLEMENTATION" ]] && \
+  CONFIG_ARGS+=(+model.override_config.attn_implementation="$SFT_ATTN_IMPLEMENTATION")
+if [[ -n "$SFT_DATASET_PATH" ]]; then
+  CONFIG_ARGS+=(data.custom_cls.path="$SFT_DATASET_PATH" data.custom_cls.name="$SFT_DATASET_NAME")
 fi
 
 if [[ ! -f "$SFT_DATA" ]]; then
@@ -56,12 +69,13 @@ fi
 CKPT_DIR="$SFT_OUTPUT_DIR/verl_checkpoints"
 
 set -x
-torchrun --standalone --nnodes=1 --nproc_per_node="$N_GPUS" \
+"$PYTHON" -m torch.distributed.run --standalone --nnodes=1 --nproc_per_node="$N_GPUS" \
   -m verl.trainer.sft_trainer \
   data.train_files="$SFT_DATA" \
   data.train_batch_size="$SFT_BATCH_SIZE" \
   data.micro_batch_size_per_gpu="$SFT_MICRO_BATCH_SIZE_PER_GPU" \
   data.max_length="$SFT_MAX_LENGTH" \
+  data.max_token_len_per_gpu="$SFT_MAX_TOKEN_LEN_PER_GPU" \
   model.path="$MODEL_PATH" \
   model.trust_remote_code=True \
   optim.lr="$SFT_LR" \
@@ -72,6 +86,7 @@ torchrun --standalone --nnodes=1 --nproc_per_node="$N_GPUS" \
   trainer.save_freq="$SFT_SAVE_FREQ" \
   'trainer.logger=["console"]' \
   "${LORA_ARGS[@]}" \
+  "${CONFIG_ARGS[@]}" \
   "$@"
 set +x
 

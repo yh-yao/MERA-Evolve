@@ -210,10 +210,24 @@ def telecom_small_task_ids() -> list[str]:
     return [t["id"] for t in _load_all_tasks("telecom")]
 
 
-def make_llm_spec(model: str, api_base: str, api_key: str = "EMPTY"):
+def make_llm_spec(
+    model: str,
+    api_base: str,
+    api_key: str = "EMPTY",
+    *,
+    enable_thinking: bool | None = None,
+    max_tokens: int | None = None,
+):
     from core.schemas.artifacts import LLMSpec
 
-    return LLMSpec(model=model, args={"api_base": api_base, "api_key": api_key})
+    args: dict[str, Any] = {"api_base": api_base, "api_key": api_key}
+    if max_tokens is not None:
+        args["max_tokens"] = max_tokens
+    if enable_thinking is not None:
+        args["extra_body"] = {
+            "chat_template_kwargs": {"enable_thinking": enable_thinking}
+        }
+    return LLMSpec(model=model, args=args)
 
 
 def build_agent_context(

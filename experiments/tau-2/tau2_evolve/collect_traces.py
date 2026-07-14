@@ -39,9 +39,22 @@ def main() -> int:
     ap.add_argument("--agent-model", default="openai/evol-llm-agent")
     ap.add_argument("--agent-base-url", default="http://127.0.0.1:8200/v1")
     ap.add_argument("--agent-api-key", default="EMPTY")
+    ap.add_argument(
+        "--agent-max-tokens", type=int, default=None,
+        help="Maximum tokens per agent turn; useful for bounding verbose local models.",
+    )
+    ap.add_argument(
+        "--agent-thinking", action=argparse.BooleanOptionalAction, default=None,
+        help="Enable or disable Qwen3 thinking through the server chat template.",
+    )
     ap.add_argument("--user-model", default="openai/evol-llm-user")
     ap.add_argument("--user-base-url", default="http://127.0.0.1:8201/v1")
     ap.add_argument("--user-api-key", default="EMPTY")
+    ap.add_argument("--user-max-tokens", type=int, default=None)
+    ap.add_argument(
+        "--user-thinking", action=argparse.BooleanOptionalAction, default=None,
+        help="Enable or disable Qwen3 thinking for the user simulator.",
+    )
     ap.add_argument("--probe-only", action="store_true",
                      help="If the main attempt fails or omits required golden actions, retry "
                           "with the fallback agent+user -- a separate full rollout, not a "
@@ -77,8 +90,20 @@ def main() -> int:
     if args.skillbook:
         skillbook = json.loads(args.skillbook.read_text())
 
-    agent_spec = benchmark.make_llm_spec(args.agent_model, args.agent_base_url, args.agent_api_key)
-    user_spec = benchmark.make_llm_spec(args.user_model, args.user_base_url, args.user_api_key)
+    agent_spec = benchmark.make_llm_spec(
+        args.agent_model,
+        args.agent_base_url,
+        args.agent_api_key,
+        enable_thinking=args.agent_thinking,
+        max_tokens=args.agent_max_tokens,
+    )
+    user_spec = benchmark.make_llm_spec(
+        args.user_model,
+        args.user_base_url,
+        args.user_api_key,
+        enable_thinking=args.user_thinking,
+        max_tokens=args.user_max_tokens,
+    )
     benchmark.prime_nl_judge_routing(user_spec)  # single-threaded, before the pool below
 
     fallback_agent_spec = fallback_user_spec = None
@@ -89,11 +114,15 @@ def main() -> int:
             args.fallback_agent_api_key
             or os.environ.get("COMMONSTACK_API_KEY")
             or args.user_api_key,
+            enable_thinking=args.user_thinking,
+            max_tokens=args.user_max_tokens,
         )
         fallback_user_spec = benchmark.make_llm_spec(
             args.fallback_user_model or args.user_model,
             args.fallback_user_base_url or args.user_base_url,
             args.fallback_user_api_key or args.user_api_key,
+            enable_thinking=args.user_thinking,
+            max_tokens=args.user_max_tokens,
         )
 
     print(
