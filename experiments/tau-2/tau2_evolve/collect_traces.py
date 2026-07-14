@@ -114,8 +114,8 @@ def main() -> int:
             args.fallback_agent_api_key
             or os.environ.get("COMMONSTACK_API_KEY")
             or args.user_api_key,
-            enable_thinking=args.user_thinking,
-            max_tokens=args.user_max_tokens,
+            enable_thinking=args.agent_thinking,
+            max_tokens=args.agent_max_tokens,
         )
         fallback_user_spec = benchmark.make_llm_spec(
             args.fallback_user_model or args.user_model,
