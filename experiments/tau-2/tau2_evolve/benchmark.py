@@ -21,8 +21,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
+REPO_ROOT = Path(__file__).resolve().parents[3]
 TAU2_WORKSPACE = Path(
-    os.environ.get("TAU2_WORKSPACE", "/shared_home/yuhang.yao/router-skills-evolve")
+    os.environ.get("TAU2_WORKSPACE", str(REPO_ROOT.parent / "router-skills-evolve"))
 )
 TAU2_STAGE2_ROOT = Path(
     os.environ.get("TAU2_STAGE2_ROOT", str(TAU2_WORKSPACE / "tau2_stage2"))
@@ -40,10 +41,11 @@ for _p in (TAU2_STAGE2_CODE, VENDOR_ROOT / "src"):
 
 # MERA's venv intentionally owns torch/transformers/verl. Append tau2's
 # site-packages only as a fallback for optional simulation dependencies.
-TAU2_SITE_PACKAGES = Path(os.environ.get(
-    "TAU2_SITE_PACKAGES",
-    str(TAU2_WORKSPACE / ".venv_tau2" / "lib" / "python3.12" / "site-packages"),
-))
+_tau2_site_candidates = sorted((TAU2_WORKSPACE / ".venv_tau2" / "lib").glob("python*/site-packages"))
+_default_tau2_site = _tau2_site_candidates[0] if _tau2_site_candidates else (
+    TAU2_WORKSPACE / ".venv_tau2" / "lib" / "python3" / "site-packages"
+)
+TAU2_SITE_PACKAGES = Path(os.environ.get("TAU2_SITE_PACKAGES", str(_default_tau2_site)))
 if str(TAU2_SITE_PACKAGES) not in sys.path:
     sys.path.append(str(TAU2_SITE_PACKAGES))
 

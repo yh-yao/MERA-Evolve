@@ -2,6 +2,16 @@
 
 ## Entry points
 
+Use the repository-wide launcher from the repository root:
+
+```bash
+scripts/run_experiment.sh --list
+scripts/run_experiment.sh tau2 skills
+scripts/run_experiment.sh tau2 sft
+scripts/run_experiment.sh tau2 grpo
+scripts/run_experiment.sh tau2 sft-grpo
+```
+
 The numbered scripts are the public experiment entry points:
 
 1. `01_skills_only.sh`: SkillBook ablation with no model training.
@@ -25,12 +35,12 @@ For example:
 AGENT_GPU=2 AGENT_PORT=8210 \
 USER_GPU=3 USER_PORT=8211 \
 TRAIN_GPU=5 N_CYCLES=4 \
-bash experiments/tau-2/02_sft_only.sh
+scripts/run_experiment.sh tau2 sft
 
 AGENT_GPU=2 AGENT_PORT=8210 \
 USER_GPU=3 USER_PORT=8211 \
 TRAIN_GPU=5 N_CYCLES=4 \
-bash experiments/tau-2/04_sft_grpo.sh
+scripts/run_experiment.sh tau2 sft-grpo
 ```
 
 For Qwen3.5 GRPO-only, first create a strict, domain-interleaved parquet. Do
@@ -77,10 +87,11 @@ Skillbook distillation and OPD correction use GPT-5.5 through CommonStack by
 default. The student and user simulator remain local. Override the
 `DISTILLER_*` and `OPD_TEACHER_*` variables to use other endpoints.
 
-The external tau2-stage2 checkout defaults to
-`/shared_home/yuhang.yao/router-skills-evolve`. Override `TAU2_WORKSPACE`,
-`TAU2_STAGE2_ROOT`, `TAU2_PARTITION_PATH`, or `TAU2_PYTHON` when using a
-different installation.
+The external tau2-stage2 checkout defaults to a sibling directory named
+`router-skills-evolve` next to this repository. Override `TAU2_WORKSPACE`,
+`TAU2_STAGE2_ROOT`, `TAU2_PARTITION_PATH`, `TAU2_SITE_PACKAGES`, or
+`TAU2_PYTHON` when using a different installation. See the TAU-2 setup and
+resume sections in the root `CLAUDE.md` for a complete cross-machine runbook.
 
 Qwen3.5 uses an isolated environment described by
 `requirements-qwen35-cu129.txt`. Prefix separated VERL runs with

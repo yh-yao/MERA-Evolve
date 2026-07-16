@@ -7,7 +7,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 VENV="${TRAIN_VENV:-$ROOT/.venv_qwen35}"
 CUDA_HOME="${QWEN35_CUDA_HOME:-$ROOT/.deps/cuda-12.8}"
-TAU2_WORKSPACE="${TAU2_WORKSPACE:-/shared_home/yuhang.yao/router-skills-evolve}"
+TAU2_WORKSPACE="${TAU2_WORKSPACE:-$(cd "$ROOT/.." && pwd)/router-skills-evolve}"
 TAU2_PY="${TAU2_PYTHON:-$TAU2_WORKSPACE/.venv_tau2/bin/python3}"
 FALLBACK_GPU="${FALLBACK_GPU:-2}"
 FALLBACK_PORT="${FALLBACK_PORT:-8254}"
@@ -19,6 +19,16 @@ if [[ "$MODEL_PATH" == "Qwen/Qwen3.5-4B" && -d "$CACHED_MODEL" ]]; then
   MODEL_PATH="$(find "$CACHED_MODEL" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
 fi
 mkdir -p "$RESULTS_DIR"
+
+if [[ ! -x "$VENV/bin/python" || ! -x "$VENV/bin/vllm" ]]; then
+  echo "FATAL: Qwen3.5 environment is incomplete at $VENV; set TRAIN_VENV" >&2
+  exit 2
+fi
+if [[ ! -x "$TAU2_PY" ]]; then
+  echo "FATAL: tau2 Python not found at $TAU2_PY; set TAU2_WORKSPACE or TAU2_PYTHON" >&2
+  exit 2
+fi
+VENV_SITE_PACKAGES="${TRAIN_SITE_PACKAGES:-$($VENV/bin/python -c 'import site; print(site.getsitepackages()[0])')}"
 
 if [[ ! -x "$CUDA_HOME/bin/nvcc" ]]; then
   echo "FATAL: CUDA 12.8 toolkit missing at $CUDA_HOME" >&2
@@ -47,7 +57,7 @@ for _ in $(seq 1 60); do
 done
 curl -sf "http://127.0.0.1:$FALLBACK_PORT/v1/models" >/dev/null
 
-PYTHONPATH="$ROOT/experiments/tau-2:$VENV/lib/python3.12/site-packages" \
+PYTHONPATH="$ROOT/experiments/tau-2:$VENV_SITE_PACKAGES" \
 "$TAU2_PY" -m tau2_evolve.collect_traces \
   --bucket TRAIN --domain airline --limit 1 --workers 1 --max-steps 40 \
   --agent-max-tokens 512 --agent-model openai/fallback-4b-fixed \

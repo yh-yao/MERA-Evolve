@@ -16,13 +16,22 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXPERIMENT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 ROOT="$(cd "$EXPERIMENT_DIR/../.." && pwd)"
-TAU2_WORKSPACE="${TAU2_WORKSPACE:-/shared_home/yuhang.yao/router-skills-evolve}"
+TAU2_WORKSPACE="${TAU2_WORKSPACE:-$(cd "$ROOT/.." && pwd)/router-skills-evolve}"
 TAU2_PY="${TAU2_PYTHON:-$TAU2_WORKSPACE/.venv_tau2/bin/python3}"
 TRAIN_VENV="${TRAIN_VENV:-$ROOT/venv}"
 MERA_PY="${MERA_PYTHON:-$TRAIN_VENV/bin/python3}"
 VLLM_BIN="${VLLM_BIN:-$TRAIN_VENV/bin/vllm}"
+if [[ ! -x "$TAU2_PY" ]]; then
+  echo "FATAL: tau2 Python not found at $TAU2_PY; set TAU2_WORKSPACE or TAU2_PYTHON" >&2
+  exit 2
+fi
+if [[ ! -x "$MERA_PY" || ! -x "$VLLM_BIN" ]]; then
+  echo "FATAL: training environment is incomplete at $TRAIN_VENV; set TRAIN_VENV" >&2
+  exit 2
+fi
+TRAIN_SITE_PACKAGES="${TRAIN_SITE_PACKAGES:-$($MERA_PY -c 'import site; print(site.getsitepackages()[0])')}"
 export TAU2_WORKSPACE
-export PYTHONPATH="$EXPERIMENT_DIR:$TRAIN_VENV/lib/python3.12/site-packages:${PYTHONPATH:-}"
+export PYTHONPATH="$EXPERIMENT_DIR:$TRAIN_SITE_PACKAGES:${PYTHONPATH:-}"
 cd "$ROOT"
 
 RESULTS_DIR="${RESULTS_DIR:?set RESULTS_DIR}"
@@ -156,6 +165,35 @@ done
   log "FATAL: INITIAL_SKILLBOOK does not exist: $INITIAL_SKILLBOOK" >&2
   exit 2
 }
+
+# Persist the effective non-secret configuration so a run can be reproduced
+# on another machine without recovering settings from process listings.
+"$MERA_PY" - "$RESULTS_DIR/config_snapshot.json" \
+  "git_commit=$(git rev-parse HEAD 2>/dev/null || echo unknown)" \
+  "base_model=$BASE_MODEL" "user_model_path=$USER_MODEL_PATH" \
+  "train_venv=$TRAIN_VENV" "tau2_workspace=$TAU2_WORKSPACE" \
+  "agent_gpu=$AGENT_GPU" "agent_port=$AGENT_PORT" \
+  "user_gpu=$USER_GPU" "user_port=$USER_PORT" \
+  "train_gpu=$TRAIN_GPU" "rollout_gpu=$ROLLOUT_GPU" \
+  "n_cycles=$N_CYCLES" "start_cycle=$START_CYCLE" \
+  "enable_sft=1" "enable_grpo=$ENABLE_GRPO" \
+  "enable_opd=$ENABLE_OPD" "enable_router=$ENABLE_ROUTER" \
+  "distiller_model=$DISTILLER_MODEL" "opd_teacher_model=$OPD_TEACHER_MODEL" \
+  "collect_workers=$COLLECT_WORKERS" "eval_workers=$EVAL_WORKERS" \
+  "opd_workers=$OPD_WORKERS" "opd_branch_attempts=$OPD_BRANCH_ATTEMPTS" \
+  "sft_lr=$SFT_LR" "sft_total_epochs=$SFT_TOTAL_EPOCHS" \
+  "grpo_total_steps=$GRPO_TOTAL_STEPS" \
+  "grpo_train_batch_size=$GRPO_TRAIN_BATCH_SIZE" \
+  "grpo_n_generations=$GRPO_N_GENERATIONS" "grpo_actor_lr=$GRPO_ACTOR_LR" <<'PY'
+import json
+import sys
+
+output = sys.argv[1]
+config = dict(item.split("=", 1) for item in sys.argv[2:])
+with open(output, "w", encoding="utf-8") as handle:
+    json.dump(config, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+PY
 
 log "=== starting: RESULTS_DIR=$RESULTS_DIR ENABLE_GRPO=$ENABLE_GRPO N_CYCLES=$N_CYCLES START_CYCLE=$START_CYCLE ==="
 

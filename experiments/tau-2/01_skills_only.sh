@@ -20,10 +20,14 @@ set -euo pipefail
 
 EXPERIMENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$EXPERIMENT_DIR/../.." && pwd)"
-TAU2_WORKSPACE="${TAU2_WORKSPACE:-/shared_home/yuhang.yao/router-skills-evolve}"
+TAU2_WORKSPACE="${TAU2_WORKSPACE:-$(cd "$ROOT/.." && pwd)/router-skills-evolve}"
 export PYTHONPATH="$EXPERIMENT_DIR:${PYTHONPATH:-}"
 
 TAU2_PYTHON="${TAU2_PYTHON:-$TAU2_WORKSPACE/.venv_tau2/bin/python3}"
+if [[ ! -x "$TAU2_PYTHON" ]]; then
+  echo "FATAL: tau2 Python not found at $TAU2_PYTHON; set TAU2_WORKSPACE or TAU2_PYTHON" >&2
+  exit 2
+fi
 AGENT_MODEL="${AGENT_MODEL:-openai/evol-llm-agent}"
 AGENT_BASE_URL="${AGENT_BASE_URL:-http://127.0.0.1:8200/v1}"
 USER_MODEL="${USER_MODEL:-openai/evol-llm-user}"

@@ -1,4 +1,17 @@
-# Reproducible experiment scripts
+# Reproducible experiment recipes
+
+All public recipes are dispatched through one command from the repository
+root:
+
+```bash
+scripts/run_experiment.sh --list
+scripts/run_experiment.sh humaneval_mbpp skills
+scripts/run_experiment.sh tau2 sft-grpo
+```
+
+The numbered files below are stable recipe implementations. They remain
+directly executable for compatibility, but runbooks and schedulers should use
+`scripts/run_experiment.sh` so benchmark and recipe names are explicit.
 
 One subdirectory per task domain, so domain-specific tuning (learning rate,
 batch sizes, eager-mode requirements, etc.) never gets silently mixed up
@@ -6,8 +19,7 @@ across domains. Public entry points are numbered; domain-specific support
 code and VERL configuration stay inside that domain's directory.
 
 - `humaneval_mbpp/` — HumanEval + MBPP code generation
-  (`data/raw/he_mbpp.jsonl`), the domain documented in `CLAUDE.md` and
-  `docs/experiments/`.
+  (`data/raw/he_mbpp.jsonl`).
 - `tau-2/` — tau2-bench SkillBook, SFT, and verl GRPO experiments. Its
   numbered public entry points are documented in `tau-2/README.md`.
 
@@ -43,15 +55,15 @@ MODEL_PATH=Qwen/Qwen2.5-Coder-3B-Instruct  PORT=8001 GPU=1 scripts/serve_vllm.sh
 
 # Single-mechanism isolations (01-03) each need one more free GPU for training
 # (02/03 only; 01 does no training at all)
-bash experiments/humaneval_mbpp/01_skills_only.sh
-SFT_GPU=2 bash experiments/humaneval_mbpp/02_sft_only.sh
-TRAIN_GPU=2 bash experiments/humaneval_mbpp/03_grpo_only.sh
+scripts/run_experiment.sh humaneval_mbpp skills
+SFT_GPU=2 scripts/run_experiment.sh humaneval_mbpp sft
+TRAIN_GPU=2 scripts/run_experiment.sh humaneval_mbpp grpo
 
 # Full closed loops (04-05) need one more free GPU for training, plus a
 # second small-model GPU for SMALL_RELOAD_CMD to reload onto after each
 # cycle's training step (SMALL_RELOAD_GPU) -- see each script's header.
-SFT_GPU=2 SMALL_RELOAD_GPU=0 bash experiments/humaneval_mbpp/04_4cycle_sft.sh
-GRPO_GPU=2 SMALL_RELOAD_GPU=0 bash experiments/humaneval_mbpp/05_4cycle_sft_grpo.sh
+SFT_GPU=2 SMALL_RELOAD_GPU=0 scripts/run_experiment.sh humaneval_mbpp 4cycle-sft
+GRPO_GPU=2 SMALL_RELOAD_GPU=0 scripts/run_experiment.sh humaneval_mbpp 4cycle-sft-grpo
 ```
 
 Every env var each script reads has a documented default in its header;

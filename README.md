@@ -29,7 +29,8 @@ results/ and outputs/         generated artifacts, ignored by git
 
 See [`experiments/README.md`](experiments/README.md) for the experiment index
 and [`experiments/tau-2/README.md`](experiments/tau-2/README.md) for TAU-2
-environment requirements.
+environment requirements. [`CLAUDE.md`](CLAUDE.md) is the complete
+cross-machine setup, run, resume, and monitoring guide.
 
 ## Setup
 
@@ -45,6 +46,25 @@ For example, if you have a local clone:
 
 ```bash
 pip install -e /path/to/verl
+```
+
+## Unified Experiment Launcher
+
+HumanEval/MBPP and TAU-2 recipes use the same public launcher. Configuration
+is passed as environment variables; benchmark-specific trajectory and reward
+logic remains in its adapter.
+
+```bash
+scripts/run_experiment.sh --list
+scripts/run_experiment.sh humaneval_mbpp skills
+scripts/run_experiment.sh tau2 sft-grpo --dry-run
+```
+
+For a real four-cycle TAU-2 run, set `TAU2_WORKSPACE`, `TRAIN_VENV`, model,
+GPU, port, and `RESULTS_DIR` variables as shown in `CLAUDE.md`, then run:
+
+```bash
+scripts/run_experiment.sh tau2 sft-grpo
 ```
 
 ## Prepare Data
@@ -95,7 +115,7 @@ results/smoke_evolve/cycle_0/
   skillbook/
     skill.md
     skill_statistics.json
-  sft_pairs.jsonl
+  sft_pairs.parquet
   processed/train.parquet
   processed/val.parquet
   router_train_traces.jsonl

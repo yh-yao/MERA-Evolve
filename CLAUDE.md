@@ -1,246 +1,318 @@
-# CLAUDE.md
+# MERA-Evolve
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file is the operational guide for people and coding agents working in
+this repository. Commands assume the repository root as the working directory.
 
-## What this repo is
+## What this project does
 
-MERA-Evolve is a compact "evolve loop" for HumanEval/MBPP code models. It keeps
-`verl` as the RL training core (installed separately, not vendored here) and
-adds the outer loop from the sibling project `router-skills-evolve`
-(`/shared_home/yuhang.yao/router-skills-evolve`): oracle trace collection, a
-SkillBook, a cost-calibrated learned prompt router, and held-out policy
-ablation. When in doubt about the intent of a piece of outer-loop logic (e.g.
-SFT pair extraction, the training/reload handoff), the sibling project is the
-reference implementation this repo trimmed down and rewired onto `verl` — with
-two deliberate exceptions: the SkillBook's signature scheme and the router's
-featurizer diverge from that project on purpose (see the SkillBook/Router
-notes in the architecture section below) rather than porting its current
-single-global-skill + TF-IDF design.
+MERA-Evolve trains and evaluates small language-model agents with a repeated
+closed loop:
 
-`verl` itself is not vendored in this repo — it's installed into a venv
-(`pip install -e /path/to/verl`) matching the local CUDA stack. Reward scoring
-in `verl_code_rl/` has zero dependency on verl internals (stdlib-only), so it
-can be read/tested without a GPU or a working verl install.
+1. collect trajectories from the current student model;
+2. obtain stronger, verified demonstrations for student failures;
+3. distill reusable skills from successful trajectories;
+4. update a LoRA adapter with SFT and optionally GRPO through VERL;
+5. reload the adapter, evaluate on held-out tasks, and repeat;
+6. optionally train a router that escalates difficult states to a stronger
+   model.
 
-## Setup and commands
+The repository supports two benchmark adapters behind one launcher:
 
-```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt        # openai, pandas, pyarrow, scikit-learn, joblib, pytest
-pip install -e /path/to/verl           # separate, CUDA-stack-specific
+- `humaneval_mbpp`: single-turn Python code generation with executable tests;
+- `tau2`: multi-turn customer-service agents that call airline, retail, and
+  telecom tools in tau2-bench environments.
+
+Use `scripts/run_experiment.sh` for both. Benchmark-specific implementations
+live under `experiments/`; shared code-model training and serving utilities
+live under `scripts/` and `verl_code_rl/`. Do not force the two benchmarks to
+share trajectory schemas or reward functions: the common contract is the
+experiment lifecycle and launcher, while each adapter owns its environment,
+data conversion, and reward implementation.
+
+## Repository layout
+
+```text
+scripts/run_experiment.sh       unified public experiment launcher
+scripts/run_full_pipeline.sh    HumanEval/MBPP closed-loop implementation
+scripts/{serve,stop}_vllm.sh    common model-server lifecycle
+scripts/train_{sft,grpo}.sh     code-benchmark VERL launchers
+verl_code_rl/                   code data, reward, skills, router, evaluation
+experiments/humaneval_mbpp/     reproducible code benchmark recipes
+experiments/tau-2/              tau2 adapter and reproducible recipes
+  tau2_evolve/                  collection, OPD, skills, data, router plugins
+  scripts/                      tau2 cycle and VERL launchers
+  config/                       VERL multi-turn agent-loop configuration
+  compat/                       Qwen3.5/VERL/vLLM compatibility shims
+data/raw/                       HumanEval and MBPP source data
+results/                        run outputs; not source code
+tests/                          CPU unit and orchestration tests
 ```
 
-Run all tests (pytest config sets `pythonpath=["."]`, `testpaths=["tests"]`):
+List every supported benchmark/recipe pair:
 
 ```bash
-pytest
-pytest tests/test_evolve_loop.py::test_skillbook_distills_procedure_from_successes  # single test
+scripts/run_experiment.sh --list
 ```
 
-Data prep (raw JSONL -> verl parquet):
+Legacy numbered scripts remain supported, but new runbooks and automation
+should call the unified launcher.
+
+## Common setup
+
+Prerequisites are Linux, Bash 4+, Python 3.10+, NVIDIA drivers compatible with
+the selected PyTorch wheel, and enough GPUs for serving plus training. Clone
+the repository and create the general environment:
 
 ```bash
-scripts/prepare_data.sh                                   # data/raw/he_mbpp.jsonl -> data/processed/{train,val}.parquet
-scripts/prepare_data.sh --max-train 16 --max-val 16        # smoke subset
-INPUT=data/raw/HumanEval.jsonl scripts/prepare_data.sh     # HumanEval only
+git clone git@github.com:yh-yao/MERA-Evolve.git
+cd MERA-Evolve
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -U pip
+pip install -e '.[dev]'
+# Install a VERL version compatible with this machine's torch/CUDA stack.
+pip install verl
 ```
 
-Fastest way to sanity-check the whole orchestration (no GPU, no model servers,
-no verl needed — routes through deterministic hashed mock results):
+Store credentials in the untracked `.env` file. The unified launcher and both
+pipelines load it automatically:
 
 ```bash
-bash scripts/run_full_pipeline.sh --mock --limit 8 --experiment-name smoke_evolve
+cat > .env <<'EOF'
+COMMONSTACK_API_KEY=replace-me
+EOF
+chmod 600 .env
 ```
 
-Real cycle (needs two OpenAI-compatible vLLM servers first):
+Never commit `.env`, API keys, generated adapters, model caches, or `results/`.
+Run CPU tests before launching expensive jobs:
 
 ```bash
-MODEL_PATH=Qwen/Qwen2.5-Coder-1.5B-Instruct PORT=8000 GPU=0 scripts/serve_vllm.sh
-MODEL_PATH=Qwen/Qwen2.5-Coder-3B-Instruct  PORT=8001 GPU=1 scripts/serve_vllm.sh
+pytest -q
+bash -n scripts/*.sh experiments/*/*.sh experiments/tau-2/scripts/*.sh
+```
 
-bash scripts/run_full_pipeline.sh --n-cycles 1 --limit 64 \
-  --small-model Qwen/Qwen2.5-Coder-1.5B-Instruct --large-model Qwen/Qwen2.5-Coder-3B-Instruct
+## HumanEval and MBPP
+
+This adapter uses `data/raw/he_mbpp.jsonl`. Its small and fallback models are
+OpenAI-compatible vLLM servers; SFT and GRPO use VERL LoRA training. Start the
+servers on separate GPUs:
+
+```bash
+MODEL_PATH=Qwen/Qwen2.5-Coder-1.5B-Instruct GPU=0 PORT=8000 \
+  scripts/serve_vllm.sh
+MODEL_PATH=Qwen/Qwen2.5-Coder-3B-Instruct GPU=1 PORT=8001 \
+  scripts/serve_vllm.sh
+```
+
+Run recipes through the common launcher:
+
+```bash
+scripts/run_experiment.sh humaneval_mbpp skills
+SFT_GPU=2 scripts/run_experiment.sh humaneval_mbpp sft
+TRAIN_GPU=2 scripts/run_experiment.sh humaneval_mbpp grpo
+SFT_GPU=2 SMALL_RELOAD_GPU=0 N_CYCLES=4 \
+  scripts/run_experiment.sh humaneval_mbpp 4cycle-sft
+GRPO_GPU=2 SMALL_RELOAD_GPU=0 N_CYCLES=4 \
+  scripts/run_experiment.sh humaneval_mbpp 4cycle-sft-grpo
+```
+
+For a no-GPU orchestration smoke test:
+
+```bash
+bash scripts/run_full_pipeline.sh --mock --limit 8 \
+  --experiment-name smoke_evolve
+```
+
+Useful overrides are `RESULTS_DIR`, `TRAIN_LIMIT`, `EVAL_LIMIT`, `WORKERS`,
+`SMALL_MODEL`, `LARGE_MODEL`, `SMALL_BASE_URL`, and `LARGE_BASE_URL`. Detailed
+recipe defaults are documented in `experiments/README.md` and in each numbered
+script header.
+
+Stop externally started servers when they are no longer needed:
+
+```bash
 PORT=8000 scripts/stop_vllm.sh
+PORT=8001 scripts/stop_vllm.sh
 ```
 
-Standalone GRPO training (after `prepare_data.sh`):
+## TAU-2 setup
+
+TAU-2 needs two environments because the benchmark simulator and the modern
+Qwen3.5 VERL/vLLM stack have conflicting dependency sets. By default,
+MERA-Evolve discovers a sibling checkout named `router-skills-evolve`:
+
+```text
+work/
+  MERA-Evolve/
+  router-skills-evolve/
+```
+
+The sibling checkout must contain:
+
+- `.venv_tau2/bin/python3` with tau2-stage2 dependencies;
+- `tau2_stage2/code/vendor/tau2-bench`;
+- `tau2_stage2/data_processed/stage2_v1/partition.json`.
+
+Bootstrap that checkout when it is not already available:
 
 ```bash
-source experiments/humaneval_mbpp/grpo_qwen25_1p5b.env
-scripts/train_grpo.sh                        # wraps `python -m verl.trainer.main_ppo`
-scripts/train_grpo.sh trainer.total_training_steps=2   # extra verl overrides pass through as argv
+git clone git@github.com:zeyuyuyu/router-skills-evolve.git \
+  ../router-skills-evolve
+git -C ../router-skills-evolve checkout 8a2cd9ed63aa4e065a1550a0718418a54a6fed64
+mkdir -p ../router-skills-evolve/tau2_stage2/code/vendor
+git clone https://github.com/sierra-research/tau2-bench \
+  ../router-skills-evolve/tau2_stage2/code/vendor/tau2-bench
+git -C ../router-skills-evolve/tau2_stage2/code/vendor/tau2-bench \
+  checkout 17e07b1da2bbc0cadfddeea36412686e0604127b
+
+python3.12 -m venv ../router-skills-evolve/.venv_tau2
+TAU2_PIP=../router-skills-evolve/.venv_tau2/bin/pip
+$TAU2_PIP install -U pip
+$TAU2_PIP install -e '../router-skills-evolve/tau2_stage2/code/vendor/tau2-bench[voice,knowledge]'
+$TAU2_PIP install -e ../router-skills-evolve/tau2_stage2/code
 ```
 
-Standalone eval against a running vLLM server:
+The tau2 package imports optional voice modules eagerly. Install the PortAudio
+runtime/development package with the machine's OS or conda package manager if
+`import tau2` reports a `pyaudio`/PortAudio error.
+
+If the checkout lives elsewhere, set `TAU2_WORKSPACE`. Individual components
+can be overridden with `TAU2_PYTHON`, `TAU2_STAGE2_ROOT`,
+`TAU2_PARTITION_PATH`, and `TAU2_SITE_PACKAGES`.
+
+Create the Qwen3.5 training/serving environment using the tested sequence in
+`requirements-qwen35-cu129.txt`. That file is a version record, not a lockfile
+for a fresh resolver. The important constraints are:
+
+- use a CUDA-12-compatible PyTorch build on the CUDA 12.9 driver;
+- install VERL and vLLM before the no-deps vLLM/Transformers upgrades;
+- keep NumPy 1.26 for VERL;
+- build FLA extensions with the CUDA 12.8 toolkit;
+- put Triton 3.3 only in `.deps/qwen35-triton33`, not in vLLM's global path.
+
+The expected default locations are `.venv_qwen35`, `.deps/cuda-12.8`, and
+`.deps/qwen35-triton33`. Other layouts are supported through `TRAIN_VENV`,
+`QWEN35_CUDA_HOME`, and `QWEN35_TRAIN_TRITON_OVERLAY`.
+
+Verify both environments before a full run:
 
 ```bash
-MODEL=Qwen/Qwen2.5-Coder-1.5B-Instruct PORT=8000 \
-scripts/eval_vllm.sh --split eval --dataset all --workers 32 --out results/eval.jsonl
+TAU2_WORKSPACE=${TAU2_WORKSPACE:-../router-skills-evolve}
+"$TAU2_WORKSPACE/.venv_tau2/bin/python3" -c 'import tau2; print("tau2 ok")'
+.venv_qwen35/bin/python -c 'import torch, verl, vllm; print(torch.version.cuda)'
+.venv_qwen35/bin/vllm --version
 ```
 
-## Architecture
+## Running TAU-2
 
-### Reward path (the only piece verl actually calls into)
+The full TAU-2 runner starts and health-checks its own student and user vLLM
+servers. A four-cycle Qwen3.5 run needs four GPU assignments: student serving,
+user simulation, training, and separate VERL rollout.
 
-`verl_code_rl/reward.py:compute_score` is registered in verl via
-`custom_reward_function.path=$PWD/verl_code_rl/reward.py` /
-`custom_reward_function.name=compute_score` (see `scripts/train_grpo.sh`). It
-delegates to `code_eval.py:score_solution`, which: extracts a code block from
-the model response (`extract_code`), decodes the task JSON stored in
-`reward_model.ground_truth` (`load_ground_truth`), and executes the task's
-test string in a `python -I -` subprocess with a timeout (`run_code_tests`).
-Reward is strictly binary (1.0/0.0) unless `REWARD_COMPILE_BONUS` is set,
-which adds a small shaping bonus (capped at 0.1) for code that merely
-compiles — kept off by default so pass/fail stays the dominant signal. This
-subprocess sandbox is not hardened against untrusted/malicious code, only
-adequate for HumanEval/MBPP-style iteration.
+```bash
+export TAU2_WORKSPACE=/path/to/router-skills-evolve
+export TRAIN_VENV=$PWD/.venv_qwen35
+export BASE_MODEL=Qwen/Qwen3.5-2B
+export USER_MODEL_PATH=Qwen/Qwen3.5-4B
+export AGENT_GPU=0 AGENT_PORT=8260
+export USER_GPU=1 USER_PORT=8261
+export TRAIN_GPU=2 ROLLOUT_GPU=3
+export N_CYCLES=4
+export RESULTS_DIR=$PWD/results/tau2_qwen35_$(date -u +%Y%m%d_%H%M%S)
 
-### One evolve cycle (`scripts/run_full_pipeline.sh`)
+scripts/run_experiment.sh tau2 sft-grpo
+```
 
-Each cycle strictly separates *oracle* data (used to improve the model/skills)
-from *deployed policy* data (used to measure what a router-gated cascade would
-actually cost/pass), and does these steps in order, threading `CURRENT_MODEL`,
-the skillbook, and the router forward from the previous cycle:
+Available TAU-2 recipes:
 
-1. `collect_traces.py` — for each task, run the small model (optionally
-   multiple independent samples for `small_pass_rate`) and, unless the router
-   + probe-only logic decides otherwise, the large model too. Every row
-   records both oracle outcomes (`small_success`, `large_success`) *and* a
-   simulated deployed decision (`policy_*` fields / `final_*`): a router
-   decision of "small" is a cascade that falls back to large only if small's
-   execution fails, while "large" bypasses small entirely. This fallback cost
-   is what makes the ablation numbers meaningful instead of pretending
-   router-small decisions are free.
-2. `build_skillbook.py` — folds trace outcomes into `skills.py`'s `SkillBook`
-   and re-distills each skill from successful exemplars. `extract_signature
-   (prompt, dataset)` buckets into exactly two skills, `"humaneval"` and
-   `"mbpp"` (falls back to `"coding"` for anything else) — deliberately *not*
-   `router-skills-evolve`'s current single global bucket. Each skill renders
-   as distinct sections (`_render_sections`) — `# Skill: <name>` /
-   `## When to use` / `## Procedure` / `## Common pitfalls` / `## Recurring
-   patterns` — not one flowing paragraph. `when_to_use`/`procedure` are
-   fixed, hand-written per dataset (`_STATIC_SKILL_SECTIONS`) and never
-   change; `pitfalls`/`patterns` are the only sections `--distiller-model`
-   touches (`make_llm_distiller` asks for exactly those two labeled bullet
-   lists, grounded in real successful exemplars) — deliberately *not* a tally
-   of recurring function/call names from exemplars, and structured so a bad
-   distillation can corrupt only the learned sections, never the static
-   scaffolding. Without a distiller, those two sections are simply empty.
-   `--output`/`--previous`/`--skillbook` all point at a *directory*:
-   `SkillBook.save()` writes `skill.md` (the real skill, exactly what gets
-   injected into prompts) and `skill_statistics.json` (stats/history/
-   exemplars/pitfalls/patterns — the source data skill.md is re-rendered
-   from on every load, so the two can't drift out of sync).
-3. `trace_diagnostics.py` — reports reward variance / all-pass / all-fail
-   rates from the small-sample rollouts, meant to catch degenerate GRPO
-   groups (see Notes below on temperature).
-4. `traces_to_sft.py` — pulls two kinds of SFT pairs out of oracle traces:
-   teacher pairs (small failed, large passed) and self-repair pairs (a later
-   turn in `small_turns` succeeded after an earlier turn failed). Writes
-   **parquet** with a `messages` column whose final turn is the actual
-   completion — verl's native `MultiTurnSFTDataset` reads `messages` directly
-   and masks loss by `role == "assistant"`; it does not read a separate
-   `completion` field. Always produced for inspection; only fed into an
-   actual SFT run if `ENABLE_SFT=1`. `scripts/train_sft.sh` defaults to
-   verl's own native SFT trainer (`torchrun -m verl.trainer.sft_trainer`,
-   LoRA by default) unless `SFT_TRAIN_CMD` overrides it with a different
-   (version/FSDP-specific) launcher. Since verl's generic FSDP checkpoint
-   saver doesn't produce a `lora_adapter/adapter_config.json` the way the
-   GRPO actor does, `train_sft.sh` runs `extract_sft_lora_adapter.py`
-   afterward (single-GPU/`NO_SHARD` only) to reconstruct the PEFT-wrapped
-   model and re-save just the adapter, written directly to `SFT_OUTPUT_DIR`
-   so it's immediately `serve_vllm.sh`-loadable and picked up by the next
-   GRPO cycle's `LORA_ADAPTER_PATH` continuation.
-5. `prepare_data.py` — builds the cycle-local `train.parquet`/`val.parquet`
-   verl expects (`data_source`, chat `prompt`, `ability`, `reward_model.
-   ground_truth` as a JSON blob, `extra_info`), prepending the skillbook's
-   distilled procedure to each prompt when available.
-6. GRPO training via `scripts/train_grpo.sh` (skipped with `--skip-train` or
-   `SKIP_TRAIN=1`), producing a new checkpoint that becomes `CURRENT_MODEL`
-   for the rest of the cycle and for cycle N+1. **LoRA is the default training
-   mode** (`LORA_RANK=16`/`LORA_ALPHA=32`/`LORA_TARGET_MODULES=[q_proj,k_proj,
-   v_proj,o_proj]`, set `LORA_RANK=0` for full-parameter fine-tuning) — this
-   mirrors `router-skills-evolve`'s HumanEval GRPO algorithm (frozen base +
-   trained adapter). verl syncs the adapter into its own internal vLLM
-   rollout engine every step via vLLM's dynamic `add_lora`/`remove_lora` API
-   (triggered automatically by `lora_rank>0` plus `rollout.load_format=
-   safetensors`/`rollout.layered_summon=True`) — no manual `--enable-lora`
-   flag is needed for that internal engine. The adapter is written to
-   `global_step_N/actor/lora_adapter/` (`adapter_config.json` +
-   `adapter_model.safetensors`); `run_full_pipeline.sh` prefers this path over
-   the full checkpoint when picking the next cycle's `CURRENT_MODEL`. Because
-   verl's `model.path` must always be a loadable full checkpoint,
-   `run_full_pipeline.sh` keeps `BASE_SMALL_MODEL` pinned to the original
-   model separately from `CURRENT_MODEL`, and forwards a prior cycle's
-   adapter dir as `LORA_ADAPTER_PATH` (-> `actor_rollout_ref.model.
-   lora_adapter_path`) so verl continues training the same adapter rather
-   than reloading it as `model.path` (which would fail — an adapter dir has
-   no base weights/config). This continues the same growing adapter across
-   cycles, unlike `router-skills-evolve`'s merge-then-fresh-LoRA pattern
-   (verl has no built-in merge option).
-7. **Checkpoint reload is mandatory for real closed loops**: vLLM does not
-   hot-swap a model just because a new model name/path is requested. After
-   GRPO, the pipeline calls `SMALL_RELOAD_CMD` (e.g.
-   `scripts/reload_small_vllm.sh`, which understands a plain HF checkpoint or
-   a LoRA adapter dir) and refuses to silently keep scoring against the old
-   server if that variable is unset.
-8. Router train/calibration traces are collected *separately* from the GRPO
-   train split, using a deterministic task-id hash shard
-   (`shard_tasks`/`--task-modulo`/`--task-remainder`, default modulo 5,
-   remainders 0 and 1) so the router never trains or calibrates on data the
-   policy model was just trained on.
-9. `train_router.py` fits a logistic regression classifier predicting
-   P(small fails) per prompt over frozen embedding features
-   (`verl_code_rl/embedding.py`, default `Qwen/Qwen3-Embedding-0.6B`,
-   last-token pooling — deliberately *not* TF-IDF) (`load_binomial_examples`
-   expands multi-sample rollouts into a binomial label set, grouped by
-   `task_id` for leakage-free CV), then `select_threshold` sweeps thresholds
-   on the disjoint calibration shard to pick the cost-minimal threshold
-   subject to `--target-pass-rate` (env: `ROUTER_TARGET_PASS_RATE`). Only the
-   `LogisticRegression` head is joblib-dumped to `router.joblib`;
-   `router_meta.json`'s `embedding_model` field tells every caller
-   (`collect_traces.py`, `run_ablation.py`) which embedding model to reload
-   for scoring new prompts, so training and inference features always match.
-10. A final held-out `eval` split is scored with the current model + the
-    freshly calibrated router, and `run_ablation.py` reports routing
-    accuracy, F1, and — via `policy_metrics` — the real fallback-inclusive
-    cost/pass numbers for the `large`-only, `skills`-only(no-route), `router`,
-    and `full` policy variants.
+```bash
+scripts/run_experiment.sh tau2 skills
+scripts/run_experiment.sh tau2 sft
+TRAIN_FILE=/absolute/path/to/results/run/verl_grpo.parquet \
+TRAIN_GPU=2 ROLLOUT_GPU=3 scripts/run_experiment.sh tau2 grpo
+FALLBACK_GPU=2 USER_PORT=8261 scripts/run_experiment.sh tau2 fallback-smoke
+```
 
-### Cost-aware routing
+The `sft` and `sft-grpo` recipes execute this cycle:
 
-Router threshold selection and ablation cost numbers are only meaningful in
-real currency if you set actual per-model pricing:
-`SMALL_INPUT_COST_PER_MILLION`, `SMALL_OUTPUT_COST_PER_MILLION`,
-`LARGE_INPUT_COST_PER_MILLION`, `LARGE_OUTPUT_COST_PER_MILLION`,
-`SMALL_SAMPLES`, `ROUTER_TARGET_PASS_RATE` — otherwise trace costs default to
-0 and `run_ablation`/`train_router` fall back to synthetic per-call costs.
+1. run all 97 TRAIN tasks with the current student and no independent fallback;
+2. replay failed prefixes with the OPD teacher and retain only verified fixes;
+3. build the domain SkillBook and verified multi-turn SFT parquet;
+4. train SFT, then optionally run VERL multi-turn GRPO;
+5. hot-swap the resulting LoRA into the student vLLM server;
+6. rerun TRAIN, train the escalation router, and evaluate 35 held-out tasks;
+7. carry the adapter and SkillBook into the next cycle.
 
-### Mock mode
+Defaults use GPT-5.5 through CommonStack for OPD and skill distillation. The
+student is local Qwen3.5-2B and the user simulator is local Qwen3.5-4B. Override
+`OPD_TEACHER_*` and `DISTILLER_*` to change remote teachers. Router-gated
+evaluation also uses `OPD_TEACHER_*` as its escalation endpoint.
 
-`SCALING_MOCK=1` / `--mock` (which also implies `--skip-train`) makes
-`collect_traces.py` fabricate deterministic pass/fail outcomes from a hash of
-`(task_id, model_role, cycle, sample)` instead of calling a model server —
-this is the only way to exercise the full pipeline shape without GPUs.
+Important tuning variables include `COLLECT_WORKERS`, `EVAL_WORKERS`,
+`OPD_WORKERS`, `OPD_BRANCH_ATTEMPTS`, `SFT_LR`, `SFT_TOTAL_EPOCHS`,
+`GRPO_TOTAL_STEPS`, `GRPO_TRAIN_BATCH_SIZE`, `GRPO_N_GENERATIONS`, and
+`GRPO_ACTOR_LR`. Start with repository defaults; worker counts depend on CPU,
+endpoint rate limits, and vLLM queue capacity.
 
-## Notes and gotchas
+### Resume TAU-2
 
-- Keep GRPO sampling temperature above zero (`0.7`–`1.0` is normal); at
-  temperature 0 grouped rollouts collapse to identical samples and GRPO gets
-  no advantage signal. `trace_diagnostics.json`'s all-pass/all-fail rates are
-  the diagnostic for this.
-- `data/raw/he_mbpp.jsonl` is HumanEval + MBPP normalized into one file
-  (carried over from the old project); `data/raw/HumanEval.jsonl` and
-  `data/raw/mbpp.jsonl` are the untouched per-dataset sources.
-- `verl_code_rl/code_eval.py` is deliberately stdlib-only because it's
-  imported directly by the verl reward function subprocess/worker path — don't
-  add heavy dependencies there.
-- `scripts/serve_vllm.sh` defaults `--enforce-eager` on and
-  `VLLM_USE_FLASHINFER_SAMPLER=0` for this node: with CUDA graphs enabled, a
-  `torch.AcceleratorError: CUDA error: an illegal memory access` reproduced
-  twice under concurrent eval load (consistently after ~480-510 requests);
-  with the flashinfer sampler enabled, its JIT-compiled kernel targets this
-  node's local CUDA toolchain rather than torch's bundled runtime and crashes
-  the engine on the first sampling call. Both are opt-out via
-  `ENFORCE_EAGER=0` / `VLLM_USE_FLASHINFER_SAMPLER=1` if a fixed vLLM version
-  or matching toolchain is available later.
+Use the same absolute `RESULTS_DIR`. Completed artifacts can be reused, and
+VERL resumes SFT checkpoints automatically:
+
+```bash
+export RESULTS_DIR=/absolute/path/to/results/tau2_run
+export START_CYCLE=1
+export REUSE_EXISTING_ARTIFACTS=1
+export INITIAL_ADAPTER="$(cat "$RESULTS_DIR/cycle_0/verl_grpo/final_adapter_path.txt")"
+export INITIAL_SKILLBOOK=/absolute/path/to/cycle_0/skillbook.json
+scripts/run_experiment.sh tau2 sft-grpo
+```
+
+For a failure inside the current cycle, set `START_CYCLE` to that cycle and
+leave its completed files in place. Do not point `INITIAL_ADAPTER` at a VERL
+checkpoint directory; it must contain `adapter_config.json` and
+`adapter_model.safetensors`.
+
+### Monitor TAU-2
+
+```bash
+tail -F "$RESULTS_DIR/pipeline.log"
+rg '== cycle|cycle summary|training SFT|GRPO training|Traceback|FATAL' \
+  "$RESULTS_DIR/pipeline.log"
+nvidia-smi
+```
+
+Key outputs per cycle are `train_traces.jsonl`, `opd_traces.jsonl`,
+`skillbook.json`, `sft_pairs.parquet`, `sft_adapter/`, `verl_grpo/`,
+`router.json`, `eval.jsonl`, and `eval_routed.jsonl`. The run root also stores
+the effective non-secret settings in `config_snapshot.json`.
+
+## Architecture and invariants
+
+- VERL is an installed dependency, not vendored source.
+- Training uses LoRA by default. A new adapter must be reloaded before claims
+  are made about post-training evaluation.
+- HumanEval/MBPP reward executes generated Python in a timeout-limited
+  subprocess. It is not a security sandbox for untrusted code.
+- TAU-2's official pass signal remains the evaluation metric. Golden-action
+  coverage is training shaping and demonstration filtering, not test reward.
+- OPD prefixes are context only; SFT loss is applied to verified teacher
+  suffixes. Parquet null `_trainable` markers mean the marker was omitted and
+  therefore default to trainable.
+- GRPO needs stochastic grouped rollouts. Keep temperature above zero and
+  inspect reward variance before interpreting an update.
+- TRAIN and EVAL splits must remain fixed. Never train on `eval.jsonl` or tune
+  a router threshold against held-out EVAL outcomes.
+- `RESULTS_DIR` is immutable experiment evidence. Resume in place or start a
+  new directory; do not silently mix artifacts from different configs.
+
+## Adding another benchmark
+
+Create `experiments/<benchmark>/` with numbered reproducible recipes. Keep
+environment interaction, trace conversion, and reward logic inside that
+adapter. Register public recipes in `scripts/run_experiment.sh`, document the
+required environment variables here, and add a `--dry-run` dispatch test plus
+unit tests for data/reward boundaries. Reuse shared vLLM and VERL launchers
+when their contracts fit; do not copy benchmark-specific TAU-2 assumptions
+into generic code.

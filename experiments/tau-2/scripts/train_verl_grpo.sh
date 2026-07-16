@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXPERIMENT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 ROOT="$(cd "$EXPERIMENT_DIR/../.." && pwd)"
-TAU2_WORKSPACE="${TAU2_WORKSPACE:-/shared_home/yuhang.yao/router-skills-evolve}"
+TAU2_WORKSPACE="${TAU2_WORKSPACE:-$(cd "$ROOT/.." && pwd)/router-skills-evolve}"
 TAU2_STAGE2_ROOT="${TAU2_STAGE2_ROOT:-$TAU2_WORKSPACE/tau2_stage2}"
 TRAIN_VENV="${TRAIN_VENV:-$ROOT/venv}"
 : "${TRAIN_FILE:?set TRAIN_FILE}"
@@ -107,7 +107,8 @@ TRAIN_ENTRYPOINT="verl.trainer.main_ppo"
 SEPARATION_ARGS=()
 if [[ "$SEPARATE_ROLLOUT" == "1" ]]; then
   TRAIN_ENTRYPOINT="verl.experimental.one_step_off_policy.main_ppo"
-  VERL_TRAINER_CONFIG="$TRAIN_VENV/lib/python3.12/site-packages/verl/trainer/config"
+  VERL_TRAINER_CONFIG="${VERL_TRAINER_CONFIG:-$($TRAIN_VENV/bin/python -c \
+    'from pathlib import Path; import verl; print(Path(verl.__file__).resolve().parent / "trainer" / "config")')}"
   SEPARATION_ARGS+=(
     "hydra.searchpath=[file://$VERL_TRAINER_CONFIG]"
     actor_rollout_ref.hybrid_engine=False
