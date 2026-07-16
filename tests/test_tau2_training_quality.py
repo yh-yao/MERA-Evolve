@@ -212,6 +212,16 @@ def test_sft_requires_a_nonempty_assistant_target() -> None:
     ])
 
 
+def test_sft_parquet_null_trainable_marker_defaults_to_true() -> None:
+    assert traces_to_sft._assistant_is_trainable(
+        {"role": "assistant", "_trainable": None}
+    )
+    assert traces_to_sft._assistant_is_trainable({"role": "assistant"})
+    assert not traces_to_sft._assistant_is_trainable(
+        {"role": "assistant", "_trainable": False}
+    )
+
+
 def test_sft_discards_prose_before_structured_tool_call() -> None:
     cleaned = traces_to_sft._clean_message({
         "role": "assistant",

@@ -5,6 +5,7 @@ import torch
 
 from verl.utils.chat_template import apply_chat_template
 from verl.utils.dataset.multiturn_sft_dataset import MultiTurnSFTDataset
+from tau2_evolve.traces_to_sft import _assistant_is_trainable
 
 
 class Qwen35MultiTurnSFTDataset(MultiTurnSFTDataset):
@@ -28,7 +29,7 @@ class Qwen35MultiTurnSFTDataset(MultiTurnSFTDataset):
         if enable_thinking is not None:
             kwargs["enable_thinking"] = enable_thinking
         assistant_trainable = [
-            bool(message.get("_trainable", True))
+            _assistant_is_trainable(message)
             for message in full_message
             if message.get("role") == "assistant"
         ]

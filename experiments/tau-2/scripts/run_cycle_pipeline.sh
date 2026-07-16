@@ -104,10 +104,10 @@ if [[ "$BASE_MODEL" == *"Qwen3.5"* ]]; then
     SFT_USE_TORCH_COMPILE=False
     SFT_DATASET_PATH="$EXPERIMENT_DIR/tau2_evolve/sft_dataset.py"
     SFT_DATASET_NAME=Qwen35MultiTurnSFTDataset
-    # Keep one long tau2 conversation per dynamic microbatch. Packing two
-    # Qwen3.5 GDN sequences caused an intermittent Triton backward hang and
-    # eventual CUDA launch failure after a reshuffle in the second epoch.
-    SFT_MAX_TOKEN_LEN_PER_GPU="${SFT_MAX_TOKEN_LEN_PER_GPU:-14000}"
+    # This budget must cover the longest individual sequence before dynamic
+    # batching can split the batch. Keep it aligned with data.max_length;
+    # cycle-0 OPD trajectories reached 15.8k tokens.
+    SFT_MAX_TOKEN_LEN_PER_GPU="${SFT_MAX_TOKEN_LEN_PER_GPU:-$SFT_MAX_LENGTH_DEFAULT}"
     # Qwen3.5's GDN kernels can still fail asynchronously; retain enough state
     # to resume without discarding an entire multi-epoch SFT run.
     SFT_SAVE_FREQ="${SFT_SAVE_FREQ:-3}"

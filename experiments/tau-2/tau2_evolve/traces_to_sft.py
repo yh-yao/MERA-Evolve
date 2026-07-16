@@ -89,10 +89,16 @@ def _drop_pre_user_assistant_messages(messages: list[dict]) -> list[dict]:
     ]
 
 
+def _assistant_is_trainable(message: dict) -> bool:
+    """Treat Parquet nulls as an omitted marker, not an explicit mask."""
+    marker = message.get("_trainable", True)
+    return True if marker is None else bool(marker)
+
+
 def _has_assistant_target(messages: list[dict]) -> bool:
     return any(
         message["role"] == "assistant"
-        and message.get("_trainable", True)
+        and _assistant_is_trainable(message)
         and str(message.get("content") or "").strip()
         for message in messages
     )
