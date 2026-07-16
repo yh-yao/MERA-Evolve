@@ -91,7 +91,9 @@ def _drop_pre_user_assistant_messages(messages: list[dict]) -> list[dict]:
 
 def _has_assistant_target(messages: list[dict]) -> bool:
     return any(
-        message["role"] == "assistant" and str(message.get("content") or "").strip()
+        message["role"] == "assistant"
+        and message.get("_trainable", True)
+        and str(message.get("content") or "").strip()
         for message in messages
     )
 
@@ -99,6 +101,8 @@ def _has_assistant_target(messages: list[dict]) -> bool:
 def _clean_message(m: dict) -> dict:
     tool_calls = m.get("tool_calls")
     out = {"role": m["role"], "content": m.get("content") or ""}
+    if "_trainable" in m:
+        out["_trainable"] = bool(m["_trainable"])
     if tool_calls:
         rendered_calls = []
         for tc in tool_calls:
@@ -123,8 +127,11 @@ def _clean_message(m: dict) -> dict:
         # parquet column and fills absent keys with null. Those null keys then
         # become literal training targets and teach the model to pass every
         # domain's arguments to every tool.
-        suffix = "\n".join(rendered_calls)
-        out["content"] = f"{out['content']}\n{suffix}" if out["content"] else suffix
+        # TAU requires either text or a tool call in one assistant turn. Keep
+        # only the canonical tool payload even if the serving model emitted a
+        # prose preamble; imitating mixed turns caused malformed tool calls in
+        # later cycles.
+        out["content"] = "\n".join(rendered_calls)
     return out
 
 
@@ -169,35 +176,36 @@ def main() -> int:
                 continue
             system_content = row["system_prompt"] + _render_tools_block(row.get("tools", []))
             messages = [{"role": "system", "content": system_content}]
-            messages.extend(_clean_message(m) for m in row.get("messages", []))
+            branch_index = int(row.get("opd_branch_message_index", 0) or 0)
+            for message_index, message in enumerate(row.get("messages", [])):
+                cleaned = _clean_message(message)
+                if row.get("opd_used") and cleaned["role"] == "assistant":
+                    cleaned["_trainable"] = message_index >= branch_index
+                messages.append(cleaned)
             messages = _drop_pre_user_assistant_messages(messages)
             messages = _merge_consecutive_tool_messages(messages)
             if not _has_assistant_target(messages):
                 n_without_target += 1
                 continue
-            # Loss is masked by role=="assistant" regardless of which model actually
-            # generated the turn -- so in a fallback-rescued row (agent+user both
-            # played by the fallback model), only the assistant-side turns become
-            # imitation targets, exactly like a genuine main-attempt success. Track
-            # fallback_used so downstream reporting can tell "reinforcing what the
-            # small model already does" (main success) apart from "teaching it
-            # something it couldn't do itself" (fallback rescue) -- same
-            # teacher-pair vs self-repair-pair distinction as verl_code_rl's
-            # traces_to_sft.py, just for a multi-turn agent instead of one-shot code.
+            # OPD rows preserve the replayed student prefix for context while
+            # `_trainable` limits loss to the verified teacher continuation.
             rows_out.append({
                 "domain": row["domain"],
                 "task_id": row["task_id"],
                 "messages": messages,
                 "fallback_used": bool(row.get("fallback_used", False)),
+                "opd_used": bool(row.get("opd_used", False)),
             })
 
     n_fallback = sum(r["fallback_used"] for r in rows_out)
+    n_opd = sum(r["opd_used"] for r in rows_out)
     n_unbalanced = len(rows_out)
     if args.balance_domains:
         rows_out = _balance_domains(rows_out)
     print(
         f"[traces_to_sft] {n_unbalanced}/{n_total} trajectories passed -> SFT rows "
-        f"({n_unbalanced - n_fallback} main-success, {n_fallback} fallback-rescued/teacher; "
+        f"({n_unbalanced - n_fallback - n_opd} student-success, {n_opd} OPD, "
+        f"{n_fallback} legacy fallback; "
         f"excluded {n_incomplete} passed but action-incomplete and "
         f"{n_without_target} without assistant targets)"
     )

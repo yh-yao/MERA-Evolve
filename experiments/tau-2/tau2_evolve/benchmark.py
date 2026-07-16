@@ -281,12 +281,17 @@ def run_task(
     max_steps: int = 60,
     max_errors: int = 10,
     skill_text: str = "",
+    message_history: list[dict[str, Any]] | None = None,
+    router_model_path: str | Path | None = None,
+    router_teacher_spec=None,
 ) -> dict[str, Any]:
     """Run one tau2 task end-to-end; optionally inject skill text into the
     agent's domain policy. Returns a plain-dict trace record (JSON-safe).
     """
     from core.schemas.artifacts import RunTaskConfig
-    from tau2.data_model.tasks import Task
+    from pydantic import TypeAdapter
+    from tau2.data_model.message import Message
+    from tau2.data_model.tasks import InitialState, Task
     from tau2.evaluator.evaluator import evaluate_simulation
     from tau2.runner import build_text_orchestrator
     from tau2.data_model.simulation import TextRunConfig
@@ -299,6 +304,11 @@ def run_task(
 
     task_dict = load_task(domain, task_id)
     task_obj = Task.model_validate(task_dict)
+    if message_history is not None:
+        replay_messages = TypeAdapter(list[Message]).validate_python(message_history)
+        initial_state = task_obj.initial_state.model_copy(deep=True) if task_obj.initial_state else InitialState()
+        initial_state.message_history = replay_messages
+        task_obj = task_obj.model_copy(update={"initial_state": initial_state}, deep=True)
     config = RunTaskConfig(agent=agent_spec, user=user_spec, seed=seed, max_steps=max_steps, max_errors=max_errors)
 
     text_cfg = TextRunConfig(
@@ -320,6 +330,36 @@ def run_task(
     if skill_text:
         orch.agent.domain_policy = f"{orch.agent.domain_policy}\n\n{skill_text}"
     system_prompt, tools = _capture_agent_context(orch)
+
+    routed_agent = None
+    if router_model_path:
+        if router_teacher_spec is None:
+            raise ValueError("router_teacher_spec is required with router_model_path")
+        from tau2_evolve.router import RoutedAgent, RouterModel
+
+        teacher_cfg = TextRunConfig(
+            domain=domain,
+            agent="llm_agent",
+            llm_agent=router_teacher_spec.model,
+            llm_args_agent=dict(router_teacher_spec.args),
+            user="user_simulator",
+            llm_user=config.user.model,
+            llm_args_user=dict(config.user.args),
+            seed=config.seed,
+            max_steps=config.max_steps,
+            max_errors=config.max_errors,
+            num_trials=1,
+        )
+        teacher_orch = build_text_orchestrator(teacher_cfg, task_obj, seed=config.seed)
+        if skill_text:
+            teacher_orch.agent.domain_policy = f"{teacher_orch.agent.domain_policy}\n\n{skill_text}"
+        routed_agent = RoutedAgent(
+            orch.agent,
+            teacher_orch.agent,
+            RouterModel.load(router_model_path),
+            max_steps,
+        )
+        orch.agent = routed_agent
 
     sim = orch.run()
     sim.policy = orch.environment.get_policy()
@@ -361,4 +401,8 @@ def run_task(
         "observed_tool_calls": observed_actions,
         "action_recall": action_recall,
         "action_complete": action_complete,
+        "replayed_prefix_messages": len(message_history or []),
+        "router_used": routed_agent is not None,
+        "router_escalations": routed_agent.escalations if routed_agent else 0,
+        "router_max_probability": max(routed_agent.route_probabilities, default=0.0) if routed_agent else 0.0,
     }

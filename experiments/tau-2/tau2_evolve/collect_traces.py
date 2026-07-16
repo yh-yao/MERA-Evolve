@@ -85,6 +85,11 @@ def main() -> int:
     )
     ap.add_argument("--skillbook", type=Path, default=None,
                      help="JSON {domain: skill_text} to prepend to the agent's domain policy.")
+    ap.add_argument("--router-model", type=Path)
+    ap.add_argument("--router-teacher-model")
+    ap.add_argument("--router-teacher-base-url")
+    ap.add_argument("--router-teacher-api-key", default="EMPTY")
+    ap.add_argument("--router-teacher-max-tokens", type=int, default=1024)
     ap.add_argument("--out", type=Path, required=True)
     args = ap.parse_args()
     if args.fallback_attempts < 1:
@@ -146,6 +151,16 @@ def main() -> int:
             enable_thinking=args.user_thinking,
             max_tokens=args.user_max_tokens,
         )
+    router_teacher_spec = None
+    if args.router_model:
+        if not args.router_teacher_model or not args.router_teacher_base_url:
+            ap.error("--router-model requires --router-teacher-model and --router-teacher-base-url")
+        router_teacher_spec = benchmark.make_llm_spec(
+            args.router_teacher_model,
+            args.router_teacher_base_url,
+            args.router_teacher_api_key,
+            max_tokens=args.router_teacher_max_tokens,
+        )
 
     print(
         f"[collect] bucket={args.bucket} n_tasks={total_tasks} remaining={len(tasks)} "
@@ -160,6 +175,8 @@ def main() -> int:
             domain=domain, task_id=task_id, agent_spec=agent_spec, user_spec=user_spec,
             seed=args.seed, max_steps=args.max_steps, max_errors=args.max_errors,
             skill_text=skill_text,
+            router_model_path=args.router_model,
+            router_teacher_spec=router_teacher_spec,
         )
         main_row["fallback_used"] = False
         if (main_row["passed"] and benchmark.trace_action_complete(main_row)) or not args.probe_only:

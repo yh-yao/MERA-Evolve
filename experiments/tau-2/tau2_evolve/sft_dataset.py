@@ -27,9 +27,18 @@ class Qwen35MultiTurnSFTDataset(MultiTurnSFTDataset):
         kwargs = dict(self.apply_chat_template_kwargs)
         if enable_thinking is not None:
             kwargs["enable_thinking"] = enable_thinking
+        assistant_trainable = [
+            bool(message.get("_trainable", True))
+            for message in full_message
+            if message.get("role") == "assistant"
+        ]
+        render_messages = [
+            {key: value for key, value in message.items() if key != "_trainable"}
+            for message in full_message
+        ]
         inputs = apply_chat_template(
             processor,
-            messages=full_message,
+            messages=render_messages,
             tools=tools,
             add_generation_prompt=False,
             tokenize=True,
@@ -46,10 +55,14 @@ class Qwen35MultiTurnSFTDataset(MultiTurnSFTDataset):
         )
         end_id = self.tokenizer.convert_tokens_to_ids("<|im_end|>")
         active = False
+        assistant_index = 0
         offset = 0
         while offset < input_ids.numel():
             if input_ids[offset : offset + len(assistant_start)].tolist() == assistant_start:
-                active = True
+                if assistant_index >= len(assistant_trainable):
+                    raise ValueError("assistant mask count does not match rendered conversation")
+                active = assistant_trainable[assistant_index]
+                assistant_index += 1
                 offset += len(assistant_start)
                 continue
             if active:
@@ -59,4 +72,6 @@ class Qwen35MultiTurnSFTDataset(MultiTurnSFTDataset):
             offset += 1
         if active:
             raise ValueError("unterminated Qwen3.5 assistant turn")
+        if assistant_index != len(assistant_trainable):
+            raise ValueError("not all assistant turns were found in rendered conversation")
         return input_ids, loss_mask, attention_mask, {}

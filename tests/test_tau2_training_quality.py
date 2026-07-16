@@ -11,9 +11,15 @@ import pandas as pd
 TAU2_EXPERIMENT = Path(__file__).parents[1] / "experiments" / "tau-2"
 sys.path.insert(0, str(TAU2_EXPERIMENT))
 
-from tau2_evolve import benchmark, prepare_grpo_data, traces_to_sft  # noqa: E402
+from tau2_evolve import benchmark, collect_opd, prepare_grpo_data, traces_to_sft  # noqa: E402
 from tau2_evolve.agent_loop import _bounded_sampling_params  # noqa: E402
 from tau2_evolve.interaction import Tau2Interaction  # noqa: E402
+from tau2_evolve.router import (  # noqa: E402
+    FEATURE_NAMES,
+    RoutedAgent,
+    RouterModel,
+    router_features,
+)
 from tau2_evolve.skills import SkillBook  # noqa: E402
 from verl_code_rl.extract_sft_lora_adapter import _normalize_checkpoint_keys
 from verl_code_rl.prepare_qwen35_training_adapter import _training_adapter_key
@@ -201,6 +207,97 @@ def test_sft_requires_a_nonempty_assistant_target() -> None:
     assert traces_to_sft._has_assistant_target([
         {"role": "assistant", "content": "decision"},
     ])
+    assert not traces_to_sft._has_assistant_target([
+        {"role": "assistant", "content": "student prefix", "_trainable": False},
+    ])
+
+
+def test_sft_discards_prose_before_structured_tool_call() -> None:
+    cleaned = traces_to_sft._clean_message({
+        "role": "assistant",
+        "content": "I will look that up first.",
+        "tool_calls": [{"name": "lookup", "arguments": {"id": "123"}}],
+    })
+
+    assert "I will" not in cleaned["content"]
+    assert cleaned["content"].startswith("<tool_call>")
+
+
+def test_opd_uses_latest_valid_decision_prefixes_first() -> None:
+    messages = [
+        {"role": "assistant", "content": "hello"},
+        {"role": "user", "content": "help"},
+        {"role": "assistant", "tool_calls": [{"name": "lookup"}]},
+        {"role": "tool", "content": "result"},
+        {"role": "assistant", "content": "question"},
+        {"role": "user", "content": "yes"},
+    ]
+
+    prefixes = collect_opd.decision_prefixes(messages, max_candidates=2)
+
+    assert [index for index, _ in prefixes] == [6, 2]
+    assert [len(prefix) for _, prefix in prefixes] == [6, 2]
+
+
+def test_router_uses_only_online_observable_features() -> None:
+    features = router_features([
+        {"role": "user", "content": "help"},
+        {"role": "assistant", "tool_calls": [{"name": "lookup"}]},
+        {"role": "tool", "content": "Error: missing id", "error": True},
+    ])
+
+    assert set(features) == set(FEATURE_NAMES)
+    assert not any("expected" in name or "coverage" in name for name in features)
+    assert features["tool_error_fraction"] == 1.0
+
+
+def test_router_fit_separates_simple_continue_and_escalate_examples() -> None:
+    low = {name: 0.0 for name in FEATURE_NAMES}
+    high = {name: 1.0 for name in FEATURE_NAMES}
+    rows = [
+        {"label": 0, "features": low},
+        {"label": 0, "features": low},
+        {"label": 1, "features": high},
+        {"label": 1, "features": high},
+    ]
+
+    model = RouterModel.fit(rows)
+
+    assert model.probability(low) < 0.5
+    assert model.probability(high) > 0.5
+
+
+def test_routed_agent_hands_the_existing_history_to_teacher() -> None:
+    class FakeAgent:
+        def __init__(self, name: str):
+            self.name = name
+            self.init_histories = []
+
+        def set_seed(self, seed):
+            pass
+
+        def get_init_state(self, message_history=None):
+            history = list(message_history or [])
+            self.init_histories.append(list(history))
+            return SimpleNamespace(messages=history)
+
+        def generate_next_message(self, message, state):
+            state.messages.append(message)
+            return self.name, state
+
+    student = FakeAgent("student")
+    teacher = FakeAgent("teacher")
+    model = RouterModel([0.0] * len(FEATURE_NAMES), bias=30.0)
+    routed = RoutedAgent(student, teacher, model, max_steps=40)
+    state = routed.get_init_state(message_history=[{"role": "user", "content": "first"}])
+
+    response, state = routed.generate_next_message(
+        {"role": "tool", "content": "result"}, state
+    )
+
+    assert response == "teacher"
+    assert state.escalated
+    assert teacher.init_histories == [[{"role": "user", "content": "first"}]]
 
 
 def test_sft_adapter_export_maps_qwen35_language_model_keys() -> None:

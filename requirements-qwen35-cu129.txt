@@ -14,10 +14,15 @@
 #   .venv_qwen35/bin/pip install --no-deps opencv-python-headless==4.13.0.92
 #   .venv_qwen35/bin/pip install --no-deps --target .deps/qwen35-triton33 \
 #       triton==3.3.1
+#   conda create -y -p .deps/cuda-12.8 -c nvidia \
+#       cuda-nvcc=12.8 cuda-cudart-dev=12.8
+#   ln -s targets/x86_64-linux/lib .deps/cuda-12.8/lib64
 #
-# vLLM 0.18.1 adds the Qwen3.5 `--gdn-prefill-backend triton` switch. Use it
-# on this H100 node; the FlashInfer 0.6.x GDN prefill kernel misreads the CUDA
-# device version here. The no-deps upgrade keeps VERL's tested dependency set.
+# vLLM 0.18.1 adds the Qwen3.5 GDN backend switch. External serving uses
+# FlashInfer with the local CUDA 12.8 toolkit; compiling its JIT extension with
+# the node's system CUDA 13 toolkit causes runtime initialization failures.
+# VERL rollout keeps Triton because it runs in a separate worker environment.
+# The no-deps upgrade keeps VERL's tested dependency set.
 # Transformers 5 is required for the Qwen3.5 training model implementation;
 # vLLM serves Qwen3.5 through its own model implementation and was smoke-tested
 # with this combination despite its conservative transformers<5 metadata.

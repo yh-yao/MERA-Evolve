@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# 4-cycle tau2 closed loop, mirroring humaneval_mbpp's run_full_pipeline.sh:
-# each cycle does collect(probe-only fallback) -> skillbook -> SFT -> [GRPO
-# if ENABLE_GRPO=1] -> reload agent server -> held-out eval, threading the
-# LoRA adapter forward cycle-to-cycle (SFT continues the previous cycle's
-# adapter; GRPO, if enabled, continues training that same adapter further
-# within the cycle).
+# 4-cycle tau2 closed loop. Each cycle collects unbiased student traces,
+# obtains verified teacher suffixes by replaying failed decision states (OPD),
+# builds skills, runs SFT and optional GRPO, then learns an escalation router
+# from fresh post-training trajectories before plain and routed evaluation.
+# The LoRA adapter is threaded forward cycle-to-cycle.
 #
 # Env vars (all required to be set explicitly by the caller for this
 # overnight run -- no interactive prompts):
@@ -48,9 +47,18 @@ USER_MODEL_PATH="${USER_MODEL_PATH:-Qwen/Qwen2.5-3B-Instruct}"
 DISTILLER_MODEL="${DISTILLER_MODEL:-openai/gpt-5.5}"
 DISTILLER_BASE_URL="${DISTILLER_BASE_URL:-https://api.commonstack.ai/v1}"
 DISTILLER_API_KEY="${DISTILLER_API_KEY:-}"
-FALLBACK_AGENT_MODEL="${FALLBACK_AGENT_MODEL:-openai/evol-llm-user}"
-FALLBACK_AGENT_BASE_URL="${FALLBACK_AGENT_BASE_URL:-}"
-FALLBACK_ATTEMPTS="${FALLBACK_ATTEMPTS:-1}"
+ENABLE_OPD="${ENABLE_OPD:-1}"
+ENABLE_ROUTER="${ENABLE_ROUTER:-1}"
+# Tau2 calls LiteLLM, where the first `openai/` selects the provider and the
+# remainder is forwarded to CommonStack. CommonStack's model ID itself also
+# contains `openai/`; the direct OpenAI-client distiller needs only one prefix.
+OPD_TEACHER_MODEL="${OPD_TEACHER_MODEL:-openai/openai/gpt-5.5}"
+OPD_TEACHER_BASE_URL="${OPD_TEACHER_BASE_URL:-$DISTILLER_BASE_URL}"
+OPD_TEACHER_API_KEY="${OPD_TEACHER_API_KEY:-$DISTILLER_API_KEY}"
+OPD_WORKERS="${OPD_WORKERS:-8}"
+OPD_BRANCH_ATTEMPTS="${OPD_BRANCH_ATTEMPTS:-3}"
+OPD_TEACHER_MAX_TOKENS="${OPD_TEACHER_MAX_TOKENS:-1024}"
+ROUTER_THRESHOLD="${ROUTER_THRESHOLD:-0.5}"
 COLLECT_MAX_STEPS="${COLLECT_MAX_STEPS:-40}"
 COLLECT_WORKERS="${COLLECT_WORKERS:-96}"
 EVAL_WORKERS="${EVAL_WORKERS:-$COLLECT_WORKERS}"
@@ -63,6 +71,9 @@ GRPO_N_GENERATIONS="${GRPO_N_GENERATIONS:-4}"
 GRPO_ACTOR_LR="${GRPO_ACTOR_LR:-5e-6}"
 GRPO_MAX_RESPONSE_LENGTH="${GRPO_MAX_RESPONSE_LENGTH:-2048}"
 REUSE_EXISTING_ARTIFACTS="${REUSE_EXISTING_ARTIFACTS:-0}"
+SFT_MIN_ROWS="${SFT_MIN_ROWS:-12}"
+SFT_LR="${SFT_LR:-1e-6}"
+SFT_TOTAL_EPOCHS="${SFT_TOTAL_EPOCHS:-1}"
 SFT_MAX_LENGTH_DEFAULT=12288
 
 MODEL_ARGS=()
@@ -75,7 +86,15 @@ if [[ "$BASE_MODEL" == *"Qwen3.5"* ]]; then
   SFT_MAX_LENGTH_DEFAULT=24576
   export PYTHONPATH="$EXPERIMENT_DIR/compat/qwen35_torch_fallback:$PYTHONPATH"
   export QWEN35_TRAIN_TRITON_OVERLAY="${QWEN35_TRAIN_TRITON_OVERLAY:-$ROOT/.deps/qwen35-triton33}"
-  MODEL_ARGS=(--language-model-only --gdn-prefill-backend triton)
+  export CUDA_HOME="${QWEN35_CUDA_HOME:-$ROOT/.deps/cuda-12.8}"
+  if [[ ! -x "$CUDA_HOME/bin/nvcc" ]]; then
+    echo "FATAL: Qwen3.5 requires the CUDA 12.8 toolkit at $CUDA_HOME" >&2
+    exit 2
+  fi
+  export PATH="$CUDA_HOME/bin:$PATH"
+  export LD_LIBRARY_PATH="$CUDA_HOME/targets/x86_64-linux/lib:${LD_LIBRARY_PATH:-}"
+  TOOL_CALL_PARSER="${TOOL_CALL_PARSER:-qwen3_xml}"
+  MODEL_ARGS=(--language-model-only --gdn-prefill-backend "${EXTERNAL_GDN_PREFILL_BACKEND:-flashinfer}")
   THINKING_ARGS=(--no-agent-thinking --no-user-thinking)
   SFT_ARGS=(
     PYTHONPATH="$QWEN35_TRAIN_TRITON_OVERLAY:$PYTHONPATH"
@@ -116,6 +135,7 @@ if [[ -f "$ROOT/.env" ]]; then
   set +a
 fi
 DISTILLER_API_KEY="${DISTILLER_API_KEY:-${COMMONSTACK_API_KEY:-}}"
+OPD_TEACHER_API_KEY="${OPD_TEACHER_API_KEY:-$DISTILLER_API_KEY}"
 
 if ! [[ "$START_CYCLE" =~ ^[0-9]+$ ]] || (( START_CYCLE >= N_CYCLES )); then
   log "FATAL: START_CYCLE must be an integer in [0, $((N_CYCLES - 1))] (got: $START_CYCLE)" >&2
@@ -145,13 +165,18 @@ log "=== starting: RESULTS_DIR=$RESULTS_DIR ENABLE_GRPO=$ENABLE_GRPO N_CYCLES=$N
 # nohup'd child, so a generic env-string-passthrough silently wouldn't work)
 start_agent_server() {
   local gpu="$1" port="$2"
+  local serve_model="$BASE_MODEL"
+  local cache_dir="$HOME/.cache/huggingface/hub/models--${BASE_MODEL//\//--}/snapshots"
+  if [[ ! -d "$serve_model" && -d "$cache_dir" ]]; then
+    serve_model="$(find "$cache_dir" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
+  fi
   if curl -sf "http://127.0.0.1:$port/v1/models" 2>/dev/null | grep -q "evol-llm-agent"; then
     log "agent server already up on port $port"
     return 0
   fi
   log "starting agent server (base, no adapter) on GPU $gpu port $port"
   CUDA_VISIBLE_DEVICES="$gpu" VLLM_USE_FLASHINFER_SAMPLER=0 VLLM_ALLOW_RUNTIME_LORA_UPDATING=True \
-    nohup "$VLLM_BIN" serve "$BASE_MODEL" \
+    nohup "$VLLM_BIN" serve "$serve_model" \
     --served-model-name evol-llm-agent \
     --enable-lora --max-lora-rank 16 \
     --port "$port" --gpu-memory-utilization 0.5 --max-model-len "$AGENT_MAX_MODEL_LEN" \
@@ -174,13 +199,18 @@ start_agent_server() {
 
 start_user_server() {
   local gpu="$1" port="$2"
+  local serve_model="$USER_MODEL_PATH"
+  local cache_dir="$HOME/.cache/huggingface/hub/models--${USER_MODEL_PATH//\//--}/snapshots"
+  if [[ ! -d "$serve_model" && -d "$cache_dir" ]]; then
+    serve_model="$(find "$cache_dir" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
+  fi
   if curl -sf "http://127.0.0.1:$port/v1/models" 2>/dev/null | grep -q "evol-llm-user"; then
     log "user server already up on port $port"
     return 0
   fi
   log "starting user server on GPU $gpu port $port"
   CUDA_VISIBLE_DEVICES="$gpu" VLLM_USE_FLASHINFER_SAMPLER=0 \
-    nohup "$VLLM_BIN" serve "$USER_MODEL_PATH" \
+    nohup "$VLLM_BIN" serve "$serve_model" \
     --served-model-name evol-llm-user \
     --port "$port" --gpu-memory-utilization 0.5 --max-model-len "$USER_MAX_MODEL_LEN" \
     --max-num-batched-tokens "$USER_MAX_MODEL_LEN" --enable-prefix-caching \
@@ -206,7 +236,6 @@ start_user_server "$USER_GPU" "$USER_PORT"
 AGENT_BASE_URL="http://127.0.0.1:$AGENT_PORT/v1"
 USER_BASE_URL="http://127.0.0.1:$USER_PORT/v1"
 DISTILLER_BASE_URL="${DISTILLER_BASE_URL:-$USER_BASE_URL}"
-FALLBACK_AGENT_BASE_URL="${FALLBACK_AGENT_BASE_URL:-$USER_BASE_URL}"
 
 CURRENT_ADAPTER="$INITIAL_ADAPTER"  # empty == base model, no adapter yet
 
@@ -244,8 +273,9 @@ for ((cycle=START_CYCLE; cycle<N_CYCLES; cycle++)); do
   mkdir -p "$OUT"
   log "== cycle $cycle =="
 
-  # 1. Collect TRAIN traces with probe-only fallback. By default, the larger
-  # local user model serves both fallback roles; hosted fallback is opt-in.
+  # 1. Collect unbiased student-only TRAIN traces. Teacher correction happens
+  # from replayed student states below; independent full-task fallback would
+  # hide the student's failure distribution and is not OPD.
   # Uses the PREVIOUS cycle's skillbook (like humaneval_mbpp's run_full_pipeline.sh) so the
   # compounding effect shows up in what gets collected, not just at final eval.
   SKILL_ARG=()
@@ -255,16 +285,35 @@ for ((cycle=START_CYCLE; cycle<N_CYCLES; cycle++)); do
   else
     log "collecting TRAIN traces (skillbook=${PREV_SKILLBOOK:-none})"
     "$TAU2_PY" -m tau2_evolve.collect_traces \
-      --bucket TRAIN --workers "$COLLECT_WORKERS" --max-steps "$COLLECT_MAX_STEPS" --probe-only --resume \
+      --bucket TRAIN --workers "$COLLECT_WORKERS" --max-steps "$COLLECT_MAX_STEPS" --resume \
       --agent-model "openai/evol-llm-agent" --agent-base-url "$AGENT_BASE_URL" \
       --user-model "openai/evol-llm-user" --user-base-url "$USER_BASE_URL" \
-      --fallback-agent-model "$FALLBACK_AGENT_MODEL" \
-      --fallback-agent-base-url "$FALLBACK_AGENT_BASE_URL" \
-      --fallback-attempts "$FALLBACK_ATTEMPTS" \
       "${AGENT_TOKEN_ARGS[@]}" \
       "${THINKING_ARGS[@]}" \
       "${SKILL_ARG[@]}" \
       --out "$OUT/train_traces.jsonl" >> "$LOG" 2>&1
+  fi
+
+  # 1b. Replay failed student prefixes and let the teacher generate a verified
+  # suffix. Router labels are counterfactual: student success -> continue;
+  # verified teacher rescue -> escalate.
+  OPD_TRACES="$OUT/opd_traces.jsonl"
+  ROUTER_DATA="$OUT/router_data_pretrain.jsonl"
+  if [[ "$ENABLE_OPD" == "1" ]]; then
+    if [[ "$REUSE_EXISTING_ARTIFACTS" == "1" && -f "$OPD_TRACES" && -f "$ROUTER_DATA" ]]; then
+      log "reusing OPD traces and router data"
+    else
+      log "collecting verified OPD teacher suffixes"
+      "$TAU2_PY" -m tau2_evolve.collect_opd \
+        --traces "$OUT/train_traces.jsonl" --output "$OPD_TRACES" --router-data "$ROUTER_DATA" \
+        --teacher-model "$OPD_TEACHER_MODEL" --teacher-base-url "$OPD_TEACHER_BASE_URL" \
+        --teacher-api-key "$OPD_TEACHER_API_KEY" --teacher-max-tokens "$OPD_TEACHER_MAX_TOKENS" \
+        --user-base-url "$USER_BASE_URL" --max-steps "$COLLECT_MAX_STEPS" \
+        --branch-attempts "$OPD_BRANCH_ATTEMPTS" --workers "$OPD_WORKERS" \
+        "${SKILL_ARG[@]}" >> "$LOG" 2>&1
+    fi
+  else
+    : > "$OPD_TRACES"
   fi
 
   # 2. skillbook
@@ -283,15 +332,28 @@ for ((cycle=START_CYCLE; cycle<N_CYCLES; cycle++)); do
     log "reusing SFT pairs: $OUT/sft_pairs.parquet"
   else
     log "building SFT pairs"
+    SFT_TRACE_ARGS=(--traces "$OUT/train_traces.jsonl")
+    [[ -s "$OPD_TRACES" ]] && SFT_TRACE_ARGS+=(--traces "$OPD_TRACES")
+    if (( cycle > START_CYCLE )); then
+      PREV_OUT="$RESULTS_DIR/cycle_$((cycle - 1))"
+      [[ -s "$PREV_OUT/train_traces.jsonl" ]] && SFT_TRACE_ARGS+=(--traces "$PREV_OUT/train_traces.jsonl")
+      [[ -s "$PREV_OUT/opd_traces.jsonl" ]] && SFT_TRACE_ARGS+=(--traces "$PREV_OUT/opd_traces.jsonl")
+    fi
     "$MERA_PY" -m tau2_evolve.traces_to_sft \
-      --traces "$OUT/train_traces.jsonl" --output "$OUT/sft_pairs.parquet" >> "$LOG" 2>&1
+      "${SFT_TRACE_ARGS[@]}" --balance-domains --output "$OUT/sft_pairs.parquet" >> "$LOG" 2>&1
   fi
+
+  SFT_ROWS="$($MERA_PY - "$OUT/sft_pairs.parquet" <<'PYEOF'
+import pandas as pd, sys
+print(len(pd.read_parquet(sys.argv[1])))
+PYEOF
+)"
 
   SFT_ADAPTER="$OUT/sft_adapter"
   if [[ "$REUSE_EXISTING_ARTIFACTS" == "1" && -s "$SFT_ADAPTER/adapter_model.safetensors" ]]; then
     log "reusing SFT adapter: $SFT_ADAPTER"
     CURRENT_ADAPTER="$SFT_ADAPTER"
-  elif [[ -s "$OUT/sft_pairs.parquet" ]]; then
+  elif [[ -s "$OUT/sft_pairs.parquet" && "$SFT_ROWS" -ge "$SFT_MIN_ROWS" ]]; then
     log "training SFT (init_adapter=${CURRENT_ADAPTER:-none})"
     LORA_ARG=()
     [[ -n "$CURRENT_ADAPTER" ]] && LORA_ARG=(LORA_ADAPTER_PATH="$CURRENT_ADAPTER")
@@ -312,14 +374,15 @@ for ((cycle=START_CYCLE; cycle<N_CYCLES; cycle++)); do
       "${LORA_ARG[@]}" \
       SFT_BATCH_SIZE="${SFT_BATCH_SIZE:-2}" \
       SFT_MICRO_BATCH_SIZE_PER_GPU="${SFT_MICRO_BATCH_SIZE_PER_GPU:-1}" \
-      SFT_TOTAL_EPOCHS="${SFT_TOTAL_EPOCHS:-3}" \
+      SFT_LR="$SFT_LR" \
+      SFT_TOTAL_EPOCHS="$SFT_TOTAL_EPOCHS" \
       SFT_MAX_LENGTH="${SFT_MAX_LENGTH:-$SFT_MAX_LENGTH_DEFAULT}" \
       "${SFT_ARGS[@]}" \
       SFT_PROJECT_NAME=tau2_4cycle SFT_EXPERIMENT_NAME="cycle${cycle}_$(basename "$RESULTS_DIR")" \
       bash scripts/train_sft.sh data.num_workers=0 ) >> "$LOG" 2>&1
     CURRENT_ADAPTER="$SFT_ADAPTER"
   else
-    log "no SFT pairs this cycle (no successful trajectories) -- skipping SFT"
+    log "SFT quality gate: rows=$SFT_ROWS minimum=$SFT_MIN_ROWS -- skipping SFT"
   fi
 
   # 4. GRPO (continues training CURRENT_ADAPTER further, only if enabled)
@@ -372,6 +435,40 @@ for ((cycle=START_CYCLE; cycle<N_CYCLES; cycle++)); do
   if [[ -n "$CURRENT_ADAPTER" ]]; then
     reload_agent "$CURRENT_ADAPTER"
   fi
+
+  # Train the router only after the policy update, using fresh trajectories
+  # from the current checkpoint so labels do not describe a stale model.
+  ROUTER_MODEL="$OUT/router.json"
+  if [[ "$ENABLE_ROUTER" == "1" ]]; then
+    log "post-train student rollout for router labels"
+    "$TAU2_PY" -m tau2_evolve.collect_traces \
+      --bucket TRAIN --workers "$COLLECT_WORKERS" --max-steps "$COLLECT_MAX_STEPS" --resume \
+      --agent-model "openai/evol-llm-agent" --agent-base-url "$AGENT_BASE_URL" \
+      --user-model "openai/evol-llm-user" --user-base-url "$USER_BASE_URL" \
+      "${AGENT_TOKEN_ARGS[@]}" "${THINKING_ARGS[@]}" --skillbook "$OUT/skillbook.json" \
+      --out "$OUT/system_train.jsonl" >> "$LOG" 2>&1
+    "$TAU2_PY" -m tau2_evolve.collect_opd \
+      --traces "$OUT/system_train.jsonl" --output "$OUT/router_teacher_rescues.jsonl" \
+      --router-data "$OUT/router_data_posttrain.jsonl" \
+      --teacher-model "$OPD_TEACHER_MODEL" --teacher-base-url "$OPD_TEACHER_BASE_URL" \
+      --teacher-api-key "$OPD_TEACHER_API_KEY" --teacher-max-tokens "$OPD_TEACHER_MAX_TOKENS" \
+      --user-base-url "$USER_BASE_URL" --max-steps "$COLLECT_MAX_STEPS" \
+      --branch-attempts "$OPD_BRANCH_ATTEMPTS" --workers "$OPD_WORKERS" \
+      --skillbook "$OUT/skillbook.json" >> "$LOG" 2>&1
+    ROUTER_LABELS="$($MERA_PY - "$OUT/router_data_posttrain.jsonl" <<'PYEOF'
+import json, sys
+labels = {json.loads(line)["label"] for line in open(sys.argv[1]) if line.strip()}
+print(len(labels))
+PYEOF
+)"
+    if [[ "$ROUTER_LABELS" -eq 2 ]]; then
+      "$MERA_PY" -m tau2_evolve.train_router \
+        --data "$OUT/router_data_posttrain.jsonl" --output "$ROUTER_MODEL" \
+        --threshold "$ROUTER_THRESHOLD" >> "$LOG" 2>&1
+    else
+      log "router quality gate: need both labels, found $ROUTER_LABELS -- skipping router"
+    fi
+  fi
   if [[ "$REUSE_EXISTING_ARTIFACTS" == "1" && -f "$OUT/eval.jsonl" && "$(wc -l < "$OUT/eval.jsonl")" -eq 35 ]]; then
     log "reusing complete held-out EVAL: $OUT/eval.jsonl"
   else
@@ -384,6 +481,20 @@ for ((cycle=START_CYCLE; cycle<N_CYCLES; cycle++)); do
       "${THINKING_ARGS[@]}" \
       --skillbook "$OUT/skillbook.json" \
       --out "$OUT/eval.jsonl" >> "$LOG" 2>&1
+  fi
+
+  if [[ -s "$ROUTER_MODEL" ]]; then
+    log "held-out routed system EVAL (35 tasks)"
+    "$TAU2_PY" -m tau2_evolve.collect_traces \
+      --bucket EVAL --workers "$EVAL_WORKERS" --max-steps 60 --resume \
+      --agent-model "openai/evol-llm-agent" --agent-base-url "$AGENT_BASE_URL" \
+      --user-model "openai/evol-llm-user" --user-base-url "$USER_BASE_URL" \
+      --router-model "$ROUTER_MODEL" --router-teacher-model "$OPD_TEACHER_MODEL" \
+      --router-teacher-base-url "$OPD_TEACHER_BASE_URL" \
+      --router-teacher-api-key "$OPD_TEACHER_API_KEY" \
+      --router-teacher-max-tokens "$OPD_TEACHER_MAX_TOKENS" \
+      "${AGENT_TOKEN_ARGS[@]}" "${THINKING_ARGS[@]}" \
+      --skillbook "$OUT/skillbook.json" --out "$OUT/eval_routed.jsonl" >> "$LOG" 2>&1
   fi
 
   "$MERA_PY" - "$OUT/eval.jsonl" <<'PYEOF' >> "$LOG" 2>&1

@@ -58,23 +58,24 @@ run-specific resume script.
 The legacy four-cycle tau2 training pipeline defaults to
 `Qwen/Qwen2.5-1.5B-Instruct`. Model and environment variables can override it:
 
-1. Collect TRAIN trajectories with the current LoRA.
-2. Retry failed or golden-action-incomplete trajectories with the larger
-   local user model by default. Override `FALLBACK_AGENT_MODEL` and
-   `FALLBACK_AGENT_BASE_URL` to use another endpoint.
-3. Distill a domain skillbook and run verl SFT only on action-complete passes.
+1. Collect unbiased TRAIN trajectories with the current LoRA.
+2. Replay failed student decision prefixes and ask the configured OPD teacher
+   for a continuation. Only officially passing, action-complete suffixes are
+   retained, and SFT loss is masked off for the preceding student turns.
+3. Distill a domain skillbook and run verl SFT only on verified trajectories.
 4. Run real verl multi-turn GRPO against the tau2 environment. Its training
    reward is an equal blend of the official reward and golden-action recall.
-5. Hot-load the exported LoRA into the external vLLM server and evaluate the
-   fixed 35-task EVAL split.
+5. Collect fresh post-training trajectories, train a lightweight escalation
+   router on student successes and verified teacher rescues, then evaluate
+   both the policy and routed system on the fixed 35-task EVAL split.
 
 `tau2_evolve.prepare_grpo_data` balances and interleaves airline, retail, and
 telecom sampling by default. The held-out evaluator still uses the official
 tau2 reward; action recall only shapes training and filters demonstrations.
 
-Skillbook distillation uses GPT-5.5 through CommonStack by default. Trace
-collection and fallback use local models. Override `DISTILLER_MODEL`,
-`DISTILLER_BASE_URL`, and `DISTILLER_API_KEY` to use another distiller.
+Skillbook distillation and OPD correction use GPT-5.5 through CommonStack by
+default. The student and user simulator remain local. Override the
+`DISTILLER_*` and `OPD_TEACHER_*` variables to use other endpoints.
 
 The external tau2-stage2 checkout defaults to
 `/shared_home/yuhang.yao/router-skills-evolve`. Override `TAU2_WORKSPACE`,
