@@ -2,14 +2,14 @@
 verl_code_rl/collect_traces.py's probe-only fallback design: the main attempt
 (agent=small model under test, user=3B local simulator) is what measures
 actual performance. If it fails or omits required golden actions, a SEPARATE,
-INDEPENDENT fallback attempt
-(agent=3B, user=3B self-playing both sides) re-runs the same task from
+INDEPENDENT fallback attempt using the larger local model for both roles
+re-runs the same task from
 scratch to rescue a working trajectory for distillation -- not a
 mid-conversation model handoff (which needs fragile message-history surgery,
 see adapter.py's run_task_with_substitution), just two full, independent
 rollouts, exactly like the code domain's small-then-large fallback. Both the
-main user role and the fallback (agent+user) default to the same local 3B
-endpoint for now -- no hosted user-simulator API calls.
+main user role and the fallback (agent+user) default to the same local user
+endpoint -- no hosted user-simulator API calls.
 
 Usage (tau2_stage2 venv):
   PYTHONPATH=experiments/tau-2 .../.venv_tau2/bin/python3 \
@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -75,6 +74,15 @@ def main() -> int:
     ap.add_argument("--max-steps", type=int, default=60)
     ap.add_argument("--max-errors", type=int, default=10)
     ap.add_argument("--workers", type=int, default=4)
+    ap.add_argument(
+        "--resume", action="store_true",
+        help="Append to an existing output and skip task IDs already present.",
+    )
+    ap.add_argument(
+        "--tau2-log-level", default="CRITICAL",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Loguru verbosity for tau2 internals; task summaries are always printed separately.",
+    )
     ap.add_argument("--skillbook", type=Path, default=None,
                      help="JSON {domain: skill_text} to prepend to the agent's domain policy.")
     ap.add_argument("--out", type=Path, required=True)
@@ -82,9 +90,25 @@ def main() -> int:
     if args.fallback_attempts < 1:
         ap.error("--fallback-attempts must be at least 1")
 
+    # Tau2 logs every message and tool payload at DEBUG and reports unknown
+    # local-model pricing at ERROR. Under a large thread pool, serializing
+    # those records becomes measurable work and obscures task-level progress.
+    from loguru import logger
+
+    logger.remove()
+    logger.add(sys.stderr, level=args.tau2_log_level)
+
     tasks = benchmark.task_ids_for(args.bucket, args.domain)
     if args.limit >= 0:
         tasks = tasks[: args.limit]
+    total_tasks = len(tasks)
+
+    existing_rows: list[dict] = []
+    if args.resume and args.out.exists():
+        with args.out.open() as existing:
+            existing_rows = [json.loads(line) for line in existing if line.strip()]
+        completed = {(row["domain"], str(row["task_id"])) for row in existing_rows}
+        tasks = [(domain, task_id) for domain, task_id in tasks if (domain, str(task_id)) not in completed]
 
     skillbook: dict[str, str] = {}
     if args.skillbook:
@@ -111,9 +135,7 @@ def main() -> int:
         fallback_agent_spec = benchmark.make_llm_spec(
             args.fallback_agent_model or args.user_model,
             args.fallback_agent_base_url or args.user_base_url,
-            args.fallback_agent_api_key
-            or os.environ.get("COMMONSTACK_API_KEY")
-            or args.user_api_key,
+            args.fallback_agent_api_key or args.user_api_key,
             enable_thinking=args.agent_thinking,
             max_tokens=args.agent_max_tokens,
         )
@@ -126,8 +148,8 @@ def main() -> int:
         )
 
     print(
-        f"[collect] bucket={args.bucket} n_tasks={len(tasks)} skillbook={'yes' if skillbook else 'no'} "
-        f"probe_only={args.probe_only}",
+        f"[collect] bucket={args.bucket} n_tasks={total_tasks} remaining={len(tasks)} "
+        f"skillbook={'yes' if skillbook else 'no'} probe_only={args.probe_only}",
         file=sys.stderr,
     )
     args.out.parent.mkdir(parents=True, exist_ok=True)
@@ -171,9 +193,14 @@ def main() -> int:
         fallback_row["main_termination_reason"] = main_row["termination_reason"]
         return fallback_row
 
-    passed = 0
-    fallback_rescued = 0
-    with args.out.open("w") as out:
+    passed = sum(bool(row.get("passed")) for row in existing_rows)
+    fallback_rescued = sum(
+        bool(row.get("fallback_used"))
+        and bool(row.get("passed"))
+        and benchmark.trace_action_complete(row)
+        for row in existing_rows
+    )
+    with args.out.open("a" if args.resume else "w") as out:
         with ThreadPoolExecutor(max_workers=args.workers) as pool:
             futures = {pool.submit(_collect_one, domain, task_id): (domain, task_id) for domain, task_id in tasks}
             for fut in as_completed(futures):
@@ -197,7 +224,7 @@ def main() -> int:
                 )
                 print(f"[collect] {domain}/{task_id}{tag} passed={row.get('passed')} reward={row.get('reward', 0.0):.2f}", file=sys.stderr)
 
-    print(f"[collect] done passed={passed}/{len(tasks)} (fallback_rescued={fallback_rescued})", file=sys.stderr)
+    print(f"[collect] done passed={passed}/{total_tasks} (fallback_rescued={fallback_rescued})", file=sys.stderr)
     return 0
 
 

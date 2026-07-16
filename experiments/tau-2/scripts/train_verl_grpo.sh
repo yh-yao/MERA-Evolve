@@ -49,6 +49,40 @@ source "$TRAIN_VENV/bin/activate"
 export TAU2_WORKSPACE TAU2_STAGE2_ROOT
 export PYTHONPATH="$EXPERIMENT_DIR:$EXPERIMENT_DIR/compat:$TAU2_STAGE2_ROOT/code:$TAU2_STAGE2_ROOT/code/vendor/tau2-bench/src:${PYTHONPATH:-}"
 
+if [[ "$MODEL_PATH" == *"Qwen3.5"* && "$SEPARATE_ROLLOUT" == "1" ]]; then
+  : "${QWEN35_TRAIN_TRITON_OVERLAY:?set QWEN35_TRAIN_TRITON_OVERLAY for Qwen3.5 training}"
+  [[ -f "$QWEN35_TRAIN_TRITON_OVERLAY/triton/__init__.py" ]] || {
+    echo "[train_verl_grpo] invalid Triton overlay: $QWEN35_TRAIN_TRITON_OVERLAY" >&2
+    exit 2
+  }
+  "$TRAIN_VENV/bin/python" - <<'PY'
+import importlib.util
+import os
+
+import triton
+from transformers.utils.import_utils import (
+    is_causal_conv1d_available,
+    is_flash_linear_attention_available,
+)
+
+overlay = os.path.realpath(os.environ["QWEN35_TRAIN_TRITON_OVERLAY"])
+assert triton.__version__.startswith("3.6."), (
+    f"rollout runtime must retain Triton 3.6, got {triton.__version__} from {triton.__file__}"
+)
+assert importlib.util.find_spec("tilelang") is not None, "tilelang package is missing"
+assert is_flash_linear_attention_available(), "fla-core is unavailable"
+assert is_causal_conv1d_available(), "causal-conv1d is unavailable"
+print(f"[train_verl_grpo] runtime split: rollout=triton {triton.__version__}, actor={overlay}")
+PY
+fi
+
+if [[ "$MODEL_PATH" == *"Qwen3.5"* && -n "$LORA_ADAPTER_PATH" ]]; then
+  TRAINING_ADAPTER_PATH="$OUTPUT_DIR/training_init_adapter"
+  "$TRAIN_VENV/bin/python" -m verl_code_rl.prepare_qwen35_training_adapter \
+    --input "$LORA_ADAPTER_PATH" --output "$TRAINING_ADAPTER_PATH"
+  LORA_ADAPTER_PATH="$TRAINING_ADAPTER_PATH"
+fi
+
 LORA_ARGS=(
   actor_rollout_ref.model.lora_rank="$LORA_RANK"
   actor_rollout_ref.model.lora_alpha="$LORA_ALPHA"

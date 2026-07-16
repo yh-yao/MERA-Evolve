@@ -59,8 +59,9 @@ The legacy four-cycle tau2 training pipeline defaults to
 `Qwen/Qwen2.5-1.5B-Instruct`. Model and environment variables can override it:
 
 1. Collect TRAIN trajectories with the current LoRA.
-2. Retry failed or golden-action-incomplete trajectories with a stronger
-   teacher (`openai/openai/gpt-5.5` through CommonStack by default).
+2. Retry failed or golden-action-incomplete trajectories with the larger
+   local user model by default. Override `FALLBACK_AGENT_MODEL` and
+   `FALLBACK_AGENT_BASE_URL` to use another endpoint.
 3. Distill a domain skillbook and run verl SFT only on action-complete passes.
 4. Run real verl multi-turn GRPO against the tau2 environment. Its training
    reward is an equal blend of the official reward and golden-action recall.
@@ -71,9 +72,9 @@ The legacy four-cycle tau2 training pipeline defaults to
 telecom sampling by default. The held-out evaluator still uses the official
 tau2 reward; action recall only shapes training and filters demonstrations.
 
-The pipeline requires `COMMONSTACK_API_KEY` in the environment or `.env`.
-CommonStack model IDs retain their provider prefix after LiteLLM routing, so
-the teacher model is intentionally written as `openai/openai/gpt-5.5`.
+Skillbook distillation uses GPT-5.5 through CommonStack by default. Trace
+collection and fallback use local models. Override `DISTILLER_MODEL`,
+`DISTILLER_BASE_URL`, and `DISTILLER_API_KEY` to use another distiller.
 
 The external tau2-stage2 checkout defaults to
 `/shared_home/yuhang.yao/router-skills-evolve`. Override `TAU2_WORKSPACE`,
@@ -81,10 +82,13 @@ The external tau2-stage2 checkout defaults to
 different installation.
 
 Qwen3.5 uses an isolated environment described by
-`requirements-qwen35-cu129.txt`. Prefix colocated or separated VERL runs with
-`compat/qwen35_torch_fallback` as `03_grpo_only.sh` does; it disables an
-incompatible optional FLA backward path and hides the stale NIXL-EP module
-without disabling the NIXL checkpoint engine.
+`requirements-qwen35-cu129.txt`. Prefix separated VERL runs with
+`compat/qwen35_torch_fallback` as `03_grpo_only.sh` does; it gives training
+workers the Triton 3.3 + FLA runtime while rollout remains on Triton 3.6, and
+hides the stale NIXL-EP module without disabling the NIXL checkpoint engine.
+Adapters remain in vLLM's text-only key layout on disk. Before continued SFT
+or GRPO, the training scripts create a local `training_init_adapter` using
+VERL's `language_model` key layout so PEFT actually restores every LoRA key.
 
 Compare an evaluation against the SFT-only baseline with:
 

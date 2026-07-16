@@ -22,12 +22,10 @@
 # vLLM serves Qwen3.5 through its own model implementation and was smoke-tested
 # with this combination despite its conservative transformers<5 metadata.
 # Qwen3.5's FLA backward pass currently rejects Triton 3.6 on H100. Prefix
-# training commands with `PYTHONPATH=$PWD/.deps/qwen35-triton33:$PYTHONPATH`
+# training processes with `PYTHONPATH=$PWD/.deps/qwen35-triton33:$PYTHONPATH`
 # and `FLA_TILELANG=0`; do not apply this overlay to vLLM serving processes.
-# For colocated VERL GRPO, keep Triton 3.6 for vLLM and instead prefix
-# `PYTHONPATH=$PWD/experiments/tau-2/compat/qwen35_torch_fallback:$PYTHONPATH`.
-# This selects Transformers' slower, correct torch GDN backward path because
-# FLA rejects Triton >=3.4 gradients on Hopper.
+# The tau-2 compatibility module performs this split per Ray worker: actor and
+# reference workers use Triton 3.3 + FLA while rollout keeps Triton 3.6.
 #
 # The NVIDIA driver exposes CUDA 12.9 while this node's nvcc is 13.0. The
 # prebuilt PyTorch cu128 wheel is driver-compatible and avoids mixing CUDA 13

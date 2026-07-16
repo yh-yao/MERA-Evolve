@@ -1,12 +1,13 @@
-"""Select Transformers' correct Qwen3.5 torch GDN fallback for GRPO.
+"""Isolate Qwen3.5's training and rollout kernel runtimes.
 
-FLA rejects Triton >=3.4 backward on Hopper because of known incorrect
-gradients, while vLLM 0.18 requires the newer Triton bundled with PyTorch.
-VERL colocates actor and rollout imports, so GRPO must keep new Triton for
-vLLM and disable only Transformers' optional FLA fast path.
+Qwen3.5 training needs FLA with Triton 3.3 on Hopper, while vLLM 0.18 needs
+the Triton 3.6 bundled with PyTorch.  Separated VERL runs use different Ray
+processes for those roles, so inject the Triton overlay only into training
+workers and leave rollout servers on the environment's default Triton.
 """
 
 import importlib.util
+import os
 
 
 # NIXL 1.2 includes an old optional expert-parallel module. vLLM 0.18
@@ -24,9 +25,35 @@ def _find_spec_without_nixl_ep(name, package=None):
 importlib.util.find_spec = _find_spec_without_nixl_ep
 
 try:
-    from transformers.utils import import_utils
+    from verl.experimental.separation import utils as separation_utils
+    from verl.single_controller.ray import RayWorkerGroup
 
-    import_utils.is_flash_linear_attention_available = lambda: False
+    _create_role_worker_mapping = separation_utils.create_role_worker_mapping
+
+    class Qwen35TrainingRayWorkerGroup(RayWorkerGroup):
+        """Give actor/reference workers the FLA-compatible Triton runtime."""
+
+        def __init__(self, *args, **kwargs):
+            overlay = os.environ.get("QWEN35_TRAIN_TRITON_OVERLAY")
+            if not overlay or not os.path.isfile(os.path.join(overlay, "triton", "__init__.py")):
+                raise RuntimeError(
+                    "QWEN35_TRAIN_TRITON_OVERLAY must point to a Triton 3.3 overlay"
+                )
+            worker_env = dict(kwargs.pop("worker_env", {}))
+            worker_env["PYTHONPATH"] = os.pathsep.join(
+                part for part in (overlay, os.environ.get("PYTHONPATH", "")) if part
+            )
+            # TileLang 0.1.12 segfaults in cuModuleLoadData on this CUDA 12.9
+            # driver; Triton 3.3 is the validated FLA backend instead.
+            worker_env["FLA_TILELANG"] = "0"
+            kwargs["worker_env"] = worker_env
+            super().__init__(*args, **kwargs)
+
+    def _create_qwen35_role_worker_mapping(config):
+        mapping, _ = _create_role_worker_mapping(config)
+        return mapping, Qwen35TrainingRayWorkerGroup
+
+    separation_utils.create_role_worker_mapping = _create_qwen35_role_worker_mapping
 except ImportError:
     pass
 

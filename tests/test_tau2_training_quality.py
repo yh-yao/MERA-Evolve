@@ -12,9 +12,11 @@ TAU2_EXPERIMENT = Path(__file__).parents[1] / "experiments" / "tau-2"
 sys.path.insert(0, str(TAU2_EXPERIMENT))
 
 from tau2_evolve import benchmark, prepare_grpo_data, traces_to_sft  # noqa: E402
+from tau2_evolve.agent_loop import _bounded_sampling_params  # noqa: E402
 from tau2_evolve.interaction import Tau2Interaction  # noqa: E402
 from tau2_evolve.skills import SkillBook  # noqa: E402
 from verl_code_rl.extract_sft_lora_adapter import _normalize_checkpoint_keys
+from verl_code_rl.prepare_qwen35_training_adapter import _training_adapter_key
 
 
 def test_action_completion_accepts_shorter_valid_read_path() -> None:
@@ -91,6 +93,28 @@ def test_qwen_thinking_flag_is_forwarded_to_chat_template() -> None:
 def test_verl_state_evaluator_is_an_instance_method() -> None:
     parameters = list(inspect.signature(Tau2Interaction._evaluate_state).parameters)
     assert parameters[0] == "self"
+
+
+def test_agent_generation_is_bounded_by_remaining_model_context() -> None:
+    params = _bounded_sampling_params(
+        {"temperature": 0.7, "max_tokens": 2048},
+        prompt_tokens=10_000,
+        response_tokens=1_700,
+        max_model_length=10_240,
+        max_response_length=2_048,
+    )
+
+    assert params == {"temperature": 0.7, "max_tokens": 240}
+
+
+def test_agent_generation_stops_when_model_context_is_full() -> None:
+    assert _bounded_sampling_params(
+        {},
+        prompt_tokens=10_240,
+        response_tokens=1_900,
+        max_model_length=10_240,
+        max_response_length=2_048,
+    ) is None
 
 
 def test_sft_tool_calls_survive_parquet_without_argument_union(tmp_path: Path) -> None:
@@ -194,6 +218,15 @@ def test_sft_adapter_export_maps_qwen35_language_model_keys() -> None:
 
     assert normalized == {target_key: "weight"}
     assert remapped == 1
+
+
+def test_qwen35_serving_adapter_is_mapped_back_for_continued_training() -> None:
+    serving_key = "base_model.model.model.layers.3.self_attn.q_proj.lora_A.weight"
+
+    assert _training_adapter_key(serving_key) == (
+        "base_model.model.model.language_model.layers.3.self_attn.q_proj."
+        "lora_A.weight"
+    )
 
 
 def test_telecom_skill_covers_policy_mobile_data_branches() -> None:

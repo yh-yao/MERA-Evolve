@@ -49,6 +49,13 @@ LORA_TARGET_MODULES="${LORA_TARGET_MODULES:-[q_proj,k_proj,v_proj,o_proj]}"
 # as the original base checkpoint (verl loads base + this adapter together).
 LORA_ADAPTER_PATH="${LORA_ADAPTER_PATH:-}"
 
+if [[ "$MODEL_PATH" == *"Qwen3.5"* && -n "$LORA_ADAPTER_PATH" ]]; then
+  TRAINING_ADAPTER_PATH="${OUTPUT_DIR:-$PWD/results/$EXPERIMENT_NAME}/training_init_adapter"
+  "$PYTHON" -m verl_code_rl.prepare_qwen35_training_adapter \
+    --input "$LORA_ADAPTER_PATH" --output "$TRAINING_ADAPTER_PATH"
+  LORA_ADAPTER_PATH="$TRAINING_ADAPTER_PATH"
+fi
+
 if [[ ! -f "$TRAIN_FILE" || ! -f "$VAL_FILE" ]]; then
   echo "[train_grpo] missing parquet files. Run scripts/prepare_data.sh first." >&2
   exit 2

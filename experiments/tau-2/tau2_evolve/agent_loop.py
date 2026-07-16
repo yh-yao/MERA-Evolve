@@ -11,6 +11,29 @@ from tau2_evolve.interaction import Tau2Interaction
 _INTERACTING = object()
 
 
+def _bounded_sampling_params(
+    sampling_params: dict,
+    *,
+    prompt_tokens: int,
+    response_tokens: int,
+    max_model_length: int,
+    max_response_length: int,
+) -> dict | None:
+    """Limit one generation to the context and rollout space still available."""
+    available = min(
+        max_model_length - prompt_tokens,
+        max_response_length - response_tokens,
+    )
+    if available <= 0:
+        return None
+
+    bounded = dict(sampling_params)
+    configured = bounded.get("max_tokens")
+    if configured is None or int(configured) > available:
+        bounded["max_tokens"] = available
+    return bounded
+
+
 @register("tau2_agent")
 class Tau2AgentLoop(ToolAgentLoop):
     """Drive TAU-2 interactions on VERL versions without ``verl.interactions``.
@@ -24,6 +47,10 @@ class Tau2AgentLoop(ToolAgentLoop):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.interaction = Tau2Interaction({"official_reward_weight": 0.5})
+        configured_model_length = getattr(self.rollout_config, "max_model_len", None)
+        self.max_model_length = int(
+            configured_model_length or self.prompt_length + self.response_length
+        )
 
     async def run(self, sampling_params: dict, **kwargs):
         messages = list(kwargs["raw_prompt"])
@@ -112,8 +139,22 @@ class Tau2AgentLoop(ToolAgentLoop):
         return output
 
     async def _handle_generating_state(self, agent_data, sampling_params, ignore_termination=False):
+        bounded_sampling_params = _bounded_sampling_params(
+            sampling_params,
+            prompt_tokens=len(agent_data.prompt_ids),
+            response_tokens=len(agent_data.response_mask),
+            max_model_length=self.max_model_length,
+            max_response_length=self.response_length,
+        )
+        if bounded_sampling_params is None:
+            agent_data.metrics["context_limit_terminated"] = 1
+            reward = await self.interaction.force_terminate(agent_data.request_id)
+            agent_data.turn_scores.append(reward)
+            await self.interaction.finalize_interaction(agent_data.request_id)
+            return AgentState.TERMINATED
+
         state = await super()._handle_generating_state(
-            agent_data, sampling_params, ignore_termination=ignore_termination
+            agent_data, bounded_sampling_params, ignore_termination=ignore_termination
         )
         if agent_data.tool_calls:
             call = agent_data.tool_calls[0]

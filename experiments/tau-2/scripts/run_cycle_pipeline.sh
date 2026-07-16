@@ -47,13 +47,16 @@ BASE_MODEL="${BASE_MODEL:-Qwen/Qwen2.5-1.5B-Instruct}"
 USER_MODEL_PATH="${USER_MODEL_PATH:-Qwen/Qwen2.5-3B-Instruct}"
 DISTILLER_MODEL="${DISTILLER_MODEL:-openai/gpt-5.5}"
 DISTILLER_BASE_URL="${DISTILLER_BASE_URL:-https://api.commonstack.ai/v1}"
-TEACHER_MODEL="${TEACHER_MODEL:-openai/openai/gpt-5.5}"
-TEACHER_BASE_URL="${TEACHER_BASE_URL:-https://api.commonstack.ai/v1}"
-TEACHER_ATTEMPTS="${TEACHER_ATTEMPTS:-2}"
+DISTILLER_API_KEY="${DISTILLER_API_KEY:-}"
+FALLBACK_AGENT_MODEL="${FALLBACK_AGENT_MODEL:-openai/evol-llm-user}"
+FALLBACK_AGENT_BASE_URL="${FALLBACK_AGENT_BASE_URL:-}"
+FALLBACK_ATTEMPTS="${FALLBACK_ATTEMPTS:-1}"
 COLLECT_MAX_STEPS="${COLLECT_MAX_STEPS:-40}"
-COLLECT_WORKERS="${COLLECT_WORKERS:-12}"
+COLLECT_WORKERS="${COLLECT_WORKERS:-96}"
 EVAL_WORKERS="${EVAL_WORKERS:-$COLLECT_WORKERS}"
 AGENT_MAX_TOKENS="${AGENT_MAX_TOKENS:-}"
+AGENT_MAX_MODEL_LEN="${AGENT_MAX_MODEL_LEN:-16384}"
+USER_MAX_MODEL_LEN="${USER_MAX_MODEL_LEN:-32768}"
 GRPO_TOTAL_STEPS="${GRPO_TOTAL_STEPS:-10}"
 GRPO_TRAIN_BATCH_SIZE="${GRPO_TRAIN_BATCH_SIZE:-8}"
 GRPO_N_GENERATIONS="${GRPO_N_GENERATIONS:-4}"
@@ -71,14 +74,24 @@ AGENT_TOKEN_ARGS=()
 if [[ "$BASE_MODEL" == *"Qwen3.5"* ]]; then
   SFT_MAX_LENGTH_DEFAULT=24576
   export PYTHONPATH="$EXPERIMENT_DIR/compat/qwen35_torch_fallback:$PYTHONPATH"
+  export QWEN35_TRAIN_TRITON_OVERLAY="${QWEN35_TRAIN_TRITON_OVERLAY:-$ROOT/.deps/qwen35-triton33}"
   MODEL_ARGS=(--language-model-only --gdn-prefill-backend triton)
   THINKING_ARGS=(--no-agent-thinking --no-user-thinking)
   SFT_ARGS=(
+    PYTHONPATH="$QWEN35_TRAIN_TRITON_OVERLAY:$PYTHONPATH"
+    FLA_TILELANG=0
     SFT_ENABLE_THINKING=False
     SFT_ATTN_IMPLEMENTATION=sdpa
+    SFT_USE_TORCH_COMPILE=False
     SFT_DATASET_PATH="$EXPERIMENT_DIR/tau2_evolve/sft_dataset.py"
     SFT_DATASET_NAME=Qwen35MultiTurnSFTDataset
-    SFT_MAX_TOKEN_LEN_PER_GPU=24576
+    # Keep one long tau2 conversation per dynamic microbatch. Packing two
+    # Qwen3.5 GDN sequences caused an intermittent Triton backward hang and
+    # eventual CUDA launch failure after a reshuffle in the second epoch.
+    SFT_MAX_TOKEN_LEN_PER_GPU="${SFT_MAX_TOKEN_LEN_PER_GPU:-14000}"
+    # Qwen3.5's GDN kernels can still fail asynchronously; retain enough state
+    # to resume without discarding an entire multi-epoch SFT run.
+    SFT_SAVE_FREQ="${SFT_SAVE_FREQ:-3}"
   )
   GRPO_ARGS=(
     TRAIN_VENV="$TRAIN_VENV"
@@ -102,6 +115,7 @@ if [[ -f "$ROOT/.env" ]]; then
   source "$ROOT/.env"
   set +a
 fi
+DISTILLER_API_KEY="${DISTILLER_API_KEY:-${COMMONSTACK_API_KEY:-}}"
 
 if ! [[ "$START_CYCLE" =~ ^[0-9]+$ ]] || (( START_CYCLE >= N_CYCLES )); then
   log "FATAL: START_CYCLE must be an integer in [0, $((N_CYCLES - 1))] (got: $START_CYCLE)" >&2
@@ -140,7 +154,8 @@ start_agent_server() {
     nohup "$VLLM_BIN" serve "$BASE_MODEL" \
     --served-model-name evol-llm-agent \
     --enable-lora --max-lora-rank 16 \
-    --port "$port" --gpu-memory-utilization 0.5 --max-model-len 16384 \
+    --port "$port" --gpu-memory-utilization 0.5 --max-model-len "$AGENT_MAX_MODEL_LEN" \
+    --max-num-batched-tokens "$AGENT_MAX_MODEL_LEN" --enable-prefix-caching \
     --dtype bfloat16 --trust-remote-code --enforce-eager \
     "${MODEL_ARGS[@]}" \
     --enable-auto-tool-choice --tool-call-parser "${TOOL_CALL_PARSER:-hermes}" \
@@ -167,7 +182,8 @@ start_user_server() {
   CUDA_VISIBLE_DEVICES="$gpu" VLLM_USE_FLASHINFER_SAMPLER=0 \
     nohup "$VLLM_BIN" serve "$USER_MODEL_PATH" \
     --served-model-name evol-llm-user \
-    --port "$port" --gpu-memory-utilization 0.5 --max-model-len 16384 \
+    --port "$port" --gpu-memory-utilization 0.5 --max-model-len "$USER_MAX_MODEL_LEN" \
+    --max-num-batched-tokens "$USER_MAX_MODEL_LEN" --enable-prefix-caching \
     --dtype bfloat16 --trust-remote-code --enforce-eager \
     "${MODEL_ARGS[@]}" \
     --enable-auto-tool-choice --tool-call-parser "${TOOL_CALL_PARSER:-hermes}" \
@@ -189,6 +205,8 @@ start_user_server "$USER_GPU" "$USER_PORT"
 
 AGENT_BASE_URL="http://127.0.0.1:$AGENT_PORT/v1"
 USER_BASE_URL="http://127.0.0.1:$USER_PORT/v1"
+DISTILLER_BASE_URL="${DISTILLER_BASE_URL:-$USER_BASE_URL}"
+FALLBACK_AGENT_BASE_URL="${FALLBACK_AGENT_BASE_URL:-$USER_BASE_URL}"
 
 CURRENT_ADAPTER="$INITIAL_ADAPTER"  # empty == base model, no adapter yet
 
@@ -215,6 +233,10 @@ reload_agent() {
   log "agent adapter hot-swapped"
 }
 
+if [[ -n "$CURRENT_ADAPTER" ]]; then
+  reload_agent "$CURRENT_ADAPTER"
+fi
+
 PREV_SKILLBOOK="$INITIAL_SKILLBOOK"
 
 for ((cycle=START_CYCLE; cycle<N_CYCLES; cycle++)); do
@@ -222,7 +244,8 @@ for ((cycle=START_CYCLE; cycle<N_CYCLES; cycle++)); do
   mkdir -p "$OUT"
   log "== cycle $cycle =="
 
-  # 1. collect TRAIN traces with probe-only fallback (agent=current policy, user=3B; fallback=3B+3B).
+  # 1. Collect TRAIN traces with probe-only fallback. By default, the larger
+  # local user model serves both fallback roles; hosted fallback is opt-in.
   # Uses the PREVIOUS cycle's skillbook (like humaneval_mbpp's run_full_pipeline.sh) so the
   # compounding effect shows up in what gets collected, not just at final eval.
   SKILL_ARG=()
@@ -232,12 +255,12 @@ for ((cycle=START_CYCLE; cycle<N_CYCLES; cycle++)); do
   else
     log "collecting TRAIN traces (skillbook=${PREV_SKILLBOOK:-none})"
     "$TAU2_PY" -m tau2_evolve.collect_traces \
-      --bucket TRAIN --workers "$COLLECT_WORKERS" --max-steps "$COLLECT_MAX_STEPS" --probe-only \
+      --bucket TRAIN --workers "$COLLECT_WORKERS" --max-steps "$COLLECT_MAX_STEPS" --probe-only --resume \
       --agent-model "openai/evol-llm-agent" --agent-base-url "$AGENT_BASE_URL" \
       --user-model "openai/evol-llm-user" --user-base-url "$USER_BASE_URL" \
-      --fallback-agent-model "$TEACHER_MODEL" \
-      --fallback-agent-base-url "$TEACHER_BASE_URL" \
-      --fallback-attempts "$TEACHER_ATTEMPTS" \
+      --fallback-agent-model "$FALLBACK_AGENT_MODEL" \
+      --fallback-agent-base-url "$FALLBACK_AGENT_BASE_URL" \
+      --fallback-attempts "$FALLBACK_ATTEMPTS" \
       "${AGENT_TOKEN_ARGS[@]}" \
       "${THINKING_ARGS[@]}" \
       "${SKILL_ARG[@]}" \
@@ -252,7 +275,7 @@ for ((cycle=START_CYCLE; cycle<N_CYCLES; cycle++)); do
     "$TAU2_PY" -m tau2_evolve.build_skillbook \
       --traces "$OUT/train_traces.jsonl" --output "$OUT/skillbook.json" \
       --distiller-model "$DISTILLER_MODEL" --distiller-base-url "$DISTILLER_BASE_URL" \
-      --api-key "$COMMONSTACK_API_KEY" >> "$LOG" 2>&1
+      --api-key "$DISTILLER_API_KEY" >> "$LOG" 2>&1
   fi
 
   # 3. SFT (LoRA continuation from previous cycle's adapter, if any)
@@ -354,7 +377,7 @@ for ((cycle=START_CYCLE; cycle<N_CYCLES; cycle++)); do
   else
     log "held-out EVAL (35 tasks)"
     "$TAU2_PY" -m tau2_evolve.collect_traces \
-      --bucket EVAL --workers "$EVAL_WORKERS" --max-steps 60 \
+      --bucket EVAL --workers "$EVAL_WORKERS" --max-steps 60 --resume \
       --agent-model "openai/evol-llm-agent" --agent-base-url "$AGENT_BASE_URL" \
       --user-model "openai/evol-llm-user" --user-base-url "$USER_BASE_URL" \
       "${AGENT_TOKEN_ARGS[@]}" \
