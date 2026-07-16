@@ -114,9 +114,10 @@ if [[ "$BASE_MODEL" == *"Qwen3.5"* ]]; then
     SFT_DATASET_PATH="$EXPERIMENT_DIR/tau2_evolve/sft_dataset.py"
     SFT_DATASET_NAME=Qwen35MultiTurnSFTDataset
     # This budget must cover the longest individual sequence before dynamic
-    # batching can split the batch. Keep it aligned with data.max_length;
-    # cycle-0 OPD trajectories reached 15.8k tokens.
-    SFT_MAX_TOKEN_LEN_PER_GPU="${SFT_MAX_TOKEN_LEN_PER_GPU:-$SFT_MAX_LENGTH_DEFAULT}"
+    # batching can split the batch, but must not pack two long GDN sequences:
+    # cycle OPD trajectories reach about 16k and a 24k packed microbatch OOMs
+    # inside FLA's backward autotuner on an 80 GB H100.
+    SFT_MAX_TOKEN_LEN_PER_GPU="${SFT_MAX_TOKEN_LEN_PER_GPU:-16384}"
     # Qwen3.5's GDN kernels can still fail asynchronously; retain enough state
     # to resume without discarding an entire multi-epoch SFT run.
     SFT_SAVE_FREQ="${SFT_SAVE_FREQ:-3}"
