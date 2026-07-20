@@ -76,8 +76,10 @@ COLLECT_MAX_STEPS="${COLLECT_MAX_STEPS:-40}"
 COLLECT_WORKERS="${COLLECT_WORKERS:-96}"
 EVAL_WORKERS="${EVAL_WORKERS:-$COLLECT_WORKERS}"
 AGENT_MAX_TOKENS="${AGENT_MAX_TOKENS:-}"
-AGENT_MAX_MODEL_LEN="${AGENT_MAX_MODEL_LEN:-32768}"
-USER_MAX_MODEL_LEN="${USER_MAX_MODEL_LEN:-32768}"
+DEFAULT_SERVER_MAX_MODEL_LEN=32768
+[[ "$BASE_MODEL" == *"Qwen3.5"* ]] && DEFAULT_SERVER_MAX_MODEL_LEN=40960
+AGENT_MAX_MODEL_LEN="${AGENT_MAX_MODEL_LEN:-$DEFAULT_SERVER_MAX_MODEL_LEN}"
+USER_MAX_MODEL_LEN="${USER_MAX_MODEL_LEN:-$DEFAULT_SERVER_MAX_MODEL_LEN}"
 GRPO_TOTAL_STEPS="${GRPO_TOTAL_STEPS:-10}"
 GRPO_TRAIN_BATCH_SIZE="${GRPO_TRAIN_BATCH_SIZE:-8}"
 GRPO_N_GENERATIONS="${GRPO_N_GENERATIONS:-4}"
@@ -96,8 +98,11 @@ THINKING_ARGS=()
 SFT_ARGS=()
 GRPO_ARGS=()
 AGENT_TOKEN_ARGS=()
-[[ -n "$AGENT_MAX_TOKENS" ]] && AGENT_TOKEN_ARGS=(--agent-max-tokens "$AGENT_MAX_TOKENS")
 if [[ "$BASE_MODEL" == *"Qwen3.5"* ]]; then
+  # Non-thinking tool calls should be concise. Without a bound, malformed
+  # turns can generate many thousands of tokens and exhaust the conversation
+  # context before max_steps is reached.
+  AGENT_MAX_TOKENS="${AGENT_MAX_TOKENS:-1024}"
   GRPO_PPO_MICRO_BATCH_SIZE="${QWEN35_GRPO_PPO_MICRO_BATCH_SIZE:-1}"
   SFT_MAX_LENGTH_DEFAULT=24576
   export PYTHONPATH="$EXPERIMENT_DIR/compat/qwen35_torch_fallback:$PYTHONPATH"
@@ -120,11 +125,10 @@ if [[ "$BASE_MODEL" == *"Qwen3.5"* ]]; then
     SFT_USE_TORCH_COMPILE=False
     SFT_DATASET_PATH="$EXPERIMENT_DIR/tau2_evolve/sft_dataset.py"
     SFT_DATASET_NAME=Qwen35MultiTurnSFTDataset
-    # This budget must cover the longest individual sequence before dynamic
-    # batching can split the batch, but must not pack two long GDN sequences:
-    # cycle OPD trajectories reach about 16k and a 24k packed microbatch OOMs
-    # inside FLA's backward autotuner on an 80 GB H100.
-    SFT_MAX_TOKEN_LEN_PER_GPU="${SFT_MAX_TOKEN_LEN_PER_GPU:-16384}"
+    # Dynamic batching validates this budget against each individual sequence.
+    # Keep it aligned with max_length so valid long OPD trajectories are not
+    # rejected before they can be placed in a one-sequence microbatch.
+    SFT_MAX_TOKEN_LEN_PER_GPU="${SFT_MAX_TOKEN_LEN_PER_GPU:-$SFT_MAX_LENGTH_DEFAULT}"
     # Qwen3.5's GDN kernels can still fail asynchronously; retain enough state
     # to resume without discarding an entire multi-epoch SFT run.
     SFT_SAVE_FREQ="${SFT_SAVE_FREQ:-3}"
@@ -142,6 +146,7 @@ if [[ "$BASE_MODEL" == *"Qwen3.5"* ]]; then
     RAY_WORKER_SETUP_HOOK=tau2_evolve.qwen35_worker_setup.install_qwen35_worker_patches
   )
 fi
+[[ -n "$AGENT_MAX_TOKENS" ]] && AGENT_TOKEN_ARGS=(--agent-max-tokens "$AGENT_MAX_TOKENS")
 
 mkdir -p "$RESULTS_DIR"
 LOG="$RESULTS_DIR/pipeline.log"
@@ -205,6 +210,9 @@ done
   "enable_opd=$ENABLE_OPD" "enable_router=$ENABLE_ROUTER" \
   "distiller_model=$DISTILLER_MODEL" "opd_teacher_model=$OPD_TEACHER_MODEL" \
   "collect_workers=$COLLECT_WORKERS" "eval_workers=$EVAL_WORKERS" \
+  "agent_max_tokens=$AGENT_MAX_TOKENS" \
+  "agent_max_model_len=$AGENT_MAX_MODEL_LEN" \
+  "user_max_model_len=$USER_MAX_MODEL_LEN" \
   "opd_workers=$OPD_WORKERS" "opd_branch_attempts=$OPD_BRANCH_ATTEMPTS" \
   "sft_lr=$SFT_LR" "sft_total_epochs=$SFT_TOTAL_EPOCHS" \
   "grpo_total_steps=$GRPO_TOTAL_STEPS" \
