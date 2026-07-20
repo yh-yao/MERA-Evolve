@@ -8,6 +8,25 @@ workers and leave rollout servers on the environment's default Triton.
 
 import importlib.util
 import os
+import sys
+
+
+# Ray infrastructure processes inherit PYTHONPATH from the training driver.
+# Importing VERL and torch here delays their metrics-port handshake long enough
+# for raylet's 60-second watchdog to fire on a cold shared-filesystem cache.
+# They do not execute model code, so reserve the heavy patches for the driver
+# and workers that do.
+_entrypoint = os.path.realpath(sys.argv[0]).replace(os.sep, "/")
+_DEFER_HEAVY_PATCHES = any(
+    marker in _entrypoint
+    for marker in (
+        "/ray/dashboard/agent.py",
+        "/ray/dashboard/dashboard.py",
+        "/ray/_private/runtime_env/agent/main.py",
+        "/ray/_private/workers/setup_worker.py",
+        "/ray/_private/workers/default_worker.py",
+    )
+)
 
 
 # NIXL 1.2 includes an old optional expert-parallel module. vLLM 0.18
@@ -24,38 +43,14 @@ def _find_spec_without_nixl_ep(name, package=None):
 
 importlib.util.find_spec = _find_spec_without_nixl_ep
 
-try:
-    from verl.experimental.separation import utils as separation_utils
-    from verl.single_controller.ray import RayWorkerGroup
+if not _DEFER_HEAVY_PATCHES:
+    try:
+        from verl.experimental.separation import utils as separation_utils
+        from tau2_evolve.qwen35_ray_setup import create_qwen35_role_worker_mapping
 
-    _create_role_worker_mapping = separation_utils.create_role_worker_mapping
-
-    class Qwen35TrainingRayWorkerGroup(RayWorkerGroup):
-        """Give actor/reference workers the FLA-compatible Triton runtime."""
-
-        def __init__(self, *args, **kwargs):
-            overlay = os.environ.get("QWEN35_TRAIN_TRITON_OVERLAY")
-            if not overlay or not os.path.isfile(os.path.join(overlay, "triton", "__init__.py")):
-                raise RuntimeError(
-                    "QWEN35_TRAIN_TRITON_OVERLAY must point to a Triton 3.3 overlay"
-                )
-            worker_env = dict(kwargs.pop("worker_env", {}))
-            worker_env["PYTHONPATH"] = os.pathsep.join(
-                part for part in (overlay, os.environ.get("PYTHONPATH", "")) if part
-            )
-            # TileLang 0.1.12 segfaults in cuModuleLoadData on this CUDA 12.9
-            # driver; Triton 3.3 is the validated FLA backend instead.
-            worker_env["FLA_TILELANG"] = "0"
-            kwargs["worker_env"] = worker_env
-            super().__init__(*args, **kwargs)
-
-    def _create_qwen35_role_worker_mapping(config):
-        mapping, _ = _create_role_worker_mapping(config)
-        return mapping, Qwen35TrainingRayWorkerGroup
-
-    separation_utils.create_role_worker_mapping = _create_qwen35_role_worker_mapping
-except ImportError:
-    pass
+        separation_utils.create_role_worker_mapping = create_qwen35_role_worker_mapping
+    except ImportError:
+        pass
 
 
 def _index_first_axis(values, indices):
@@ -95,14 +90,20 @@ def _pad_input(hidden_states, indices, batch_size, sequence_length):
     return output.reshape(batch_size, sequence_length, *hidden_states.shape[1:])
 
 
-try:
-    from verl.utils import attention_utils
+def install_attention_patch():
+    """Install the flash-attn compatibility functions after a Ray worker registers."""
+    try:
+        from verl.utils import attention_utils
 
-    attention_utils._get_attention_functions = lambda: (
-        _index_first_axis,
-        _pad_input,
-        _rearrange,
-        _unpad_input,
-    )
-except ImportError:
-    pass
+        attention_utils._get_attention_functions = lambda: (
+            _index_first_axis,
+            _pad_input,
+            _rearrange,
+            _unpad_input,
+        )
+    except ImportError:
+        pass
+
+
+if not _DEFER_HEAVY_PATCHES:
+    install_attention_patch()

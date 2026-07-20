@@ -150,6 +150,11 @@ def make_llm_distiller(model: str, base_url: str, api_key: str):
     from openai import OpenAI
 
     client = OpenAI(base_url=base_url, api_key=api_key)
+    # LiteLLM uses the ``openai/`` prefix to select its provider, while a
+    # directly served OpenAI-compatible endpoint expects the served model
+    # name. Keep external provider model names intact.
+    local_endpoint = "127.0.0.1" in base_url or "localhost" in base_url
+    request_model = model.removeprefix("openai/") if local_endpoint else model
 
     def _distill(domain: str, exemplars: list[dict]) -> tuple[list[str], list[str]]:
         transcripts = []
@@ -171,7 +176,7 @@ def make_llm_distiller(model: str, base_url: str, api_key: str):
         joined = "\n\n---\n\n".join(transcripts)
 
         resp = client.chat.completions.create(
-            model=model,
+            model=request_model,
             messages=[
                 {"role": "system", "content": DISTILL_SYSTEM_PROMPT.format(domain=domain)},
                 {"role": "user", "content": joined[:20000]},

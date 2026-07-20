@@ -112,6 +112,16 @@ def main() -> int:
     if args.resume and args.out.exists():
         with args.out.open() as existing:
             existing_rows = [json.loads(line) for line in existing if line.strip()]
+        failed_rows = [row for row in existing_rows if row.get("error")]
+        if failed_rows:
+            # Infrastructure/parser failures are not completed benchmark
+            # outcomes. Remove them before append mode so resume replaces the
+            # rows instead of creating duplicate task IDs.
+            existing_rows = [row for row in existing_rows if not row.get("error")]
+            with args.out.open("w") as cleaned:
+                for row in existing_rows:
+                    cleaned.write(json.dumps(row, ensure_ascii=False) + "\n")
+            print(f"[collect] retrying {len(failed_rows)} errored rows", file=sys.stderr)
         completed = {(row["domain"], str(row["task_id"])) for row in existing_rows}
         tasks = [(domain, task_id) for domain, task_id in tasks if (domain, str(task_id)) not in completed]
 

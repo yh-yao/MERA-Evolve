@@ -29,6 +29,11 @@ if [[ ! -x "$MERA_PY" || ! -x "$VLLM_BIN" ]]; then
   echo "FATAL: training environment is incomplete at $TRAIN_VENV; set TRAIN_VENV" >&2
   exit 2
 fi
+# FlashInfer compiles Qwen3.5 GDN kernels lazily on the first long prefill and
+# invokes ``ninja`` by name. The executable is installed in the training venv,
+# so it must be inherited by the vLLM engine subprocess even though vLLM itself
+# is launched through an absolute path.
+export PATH="$TRAIN_VENV/bin:$PATH"
 TRAIN_SITE_PACKAGES="${TRAIN_SITE_PACKAGES:-$($MERA_PY -c 'import site; print(site.getsitepackages()[0])')}"
 export TAU2_WORKSPACE
 export PYTHONPATH="$EXPERIMENT_DIR:$TRAIN_SITE_PACKAGES:${PYTHONPATH:-}"
@@ -53,15 +58,14 @@ INITIAL_ADAPTER="${INITIAL_ADAPTER:-}"
 INITIAL_SKILLBOOK="${INITIAL_SKILLBOOK:-}"
 BASE_MODEL="${BASE_MODEL:-Qwen/Qwen2.5-1.5B-Instruct}"
 USER_MODEL_PATH="${USER_MODEL_PATH:-Qwen/Qwen2.5-3B-Instruct}"
-DISTILLER_MODEL="${DISTILLER_MODEL:-openai/gpt-5.5}"
-DISTILLER_BASE_URL="${DISTILLER_BASE_URL:-https://api.commonstack.ai/v1}"
-DISTILLER_API_KEY="${DISTILLER_API_KEY:-}"
+DISTILLER_MODEL="${DISTILLER_MODEL:-openai/evol-llm-user}"
+DISTILLER_BASE_URL="${DISTILLER_BASE_URL:-http://127.0.0.1:$USER_PORT/v1}"
+DISTILLER_API_KEY="${DISTILLER_API_KEY:-EMPTY}"
 ENABLE_OPD="${ENABLE_OPD:-1}"
 ENABLE_ROUTER="${ENABLE_ROUTER:-1}"
-# Tau2 calls LiteLLM, where the first `openai/` selects the provider and the
-# remainder is forwarded to CommonStack. CommonStack's model ID itself also
-# contains `openai/`; the direct OpenAI-client distiller needs only one prefix.
-OPD_TEACHER_MODEL="${OPD_TEACHER_MODEL:-openai/openai/gpt-5.5}"
+# By default the local user server also provides the larger 4B teacher and
+# routed fallback. External teachers remain available through explicit envs.
+OPD_TEACHER_MODEL="${OPD_TEACHER_MODEL:-openai/evol-llm-user}"
 OPD_TEACHER_BASE_URL="${OPD_TEACHER_BASE_URL:-$DISTILLER_BASE_URL}"
 OPD_TEACHER_API_KEY="${OPD_TEACHER_API_KEY:-$DISTILLER_API_KEY}"
 OPD_WORKERS="${OPD_WORKERS:-8}"
@@ -72,13 +76,15 @@ COLLECT_MAX_STEPS="${COLLECT_MAX_STEPS:-40}"
 COLLECT_WORKERS="${COLLECT_WORKERS:-96}"
 EVAL_WORKERS="${EVAL_WORKERS:-$COLLECT_WORKERS}"
 AGENT_MAX_TOKENS="${AGENT_MAX_TOKENS:-}"
-AGENT_MAX_MODEL_LEN="${AGENT_MAX_MODEL_LEN:-16384}"
+AGENT_MAX_MODEL_LEN="${AGENT_MAX_MODEL_LEN:-32768}"
 USER_MAX_MODEL_LEN="${USER_MAX_MODEL_LEN:-32768}"
 GRPO_TOTAL_STEPS="${GRPO_TOTAL_STEPS:-10}"
 GRPO_TRAIN_BATCH_SIZE="${GRPO_TRAIN_BATCH_SIZE:-8}"
 GRPO_N_GENERATIONS="${GRPO_N_GENERATIONS:-4}"
 GRPO_ACTOR_LR="${GRPO_ACTOR_LR:-5e-6}"
 GRPO_MAX_RESPONSE_LENGTH="${GRPO_MAX_RESPONSE_LENGTH:-2048}"
+GRPO_PPO_MICRO_BATCH_SIZE="${GRPO_PPO_MICRO_BATCH_SIZE:-2}"
+GRPO_SAVE_FREQ="${GRPO_SAVE_FREQ:-2}"
 REUSE_EXISTING_ARTIFACTS="${REUSE_EXISTING_ARTIFACTS:-0}"
 SFT_MIN_ROWS="${SFT_MIN_ROWS:-12}"
 SFT_LR="${SFT_LR:-1e-6}"
@@ -92,6 +98,7 @@ GRPO_ARGS=()
 AGENT_TOKEN_ARGS=()
 [[ -n "$AGENT_MAX_TOKENS" ]] && AGENT_TOKEN_ARGS=(--agent-max-tokens "$AGENT_MAX_TOKENS")
 if [[ "$BASE_MODEL" == *"Qwen3.5"* ]]; then
+  GRPO_PPO_MICRO_BATCH_SIZE="${QWEN35_GRPO_PPO_MICRO_BATCH_SIZE:-1}"
   SFT_MAX_LENGTH_DEFAULT=24576
   export PYTHONPATH="$EXPERIMENT_DIR/compat/qwen35_torch_fallback:$PYTHONPATH"
   export QWEN35_TRAIN_TRITON_OVERLAY="${QWEN35_TRAIN_TRITON_OVERLAY:-$ROOT/.deps/qwen35-triton33}"
@@ -132,6 +139,7 @@ if [[ "$BASE_MODEL" == *"Qwen3.5"* ]]; then
     ROLLOUT_GPU_MEMORY_UTILIZATION=0.70
     VLLM_GDN_PREFILL_BACKEND=triton
     VLLM_LANGUAGE_MODEL_ONLY=True
+    RAY_WORKER_SETUP_HOOK=tau2_evolve.qwen35_worker_setup.install_qwen35_worker_patches
   )
 fi
 
@@ -139,12 +147,28 @@ mkdir -p "$RESULTS_DIR"
 LOG="$RESULTS_DIR/pipeline.log"
 log() { echo "[$(date -u +%H:%M:%S)] $*" | tee -a "$LOG"; }
 
+trace_file_complete() {
+  local path="$1" expected="$2"
+  [[ -f "$path" ]] || return 1
+  "$MERA_PY" - "$path" "$expected" <<'PY' >/dev/null
+import json
+import sys
+
+path, expected = sys.argv[1], int(sys.argv[2])
+with open(path, encoding="utf-8") as handle:
+    rows = [json.loads(line) for line in handle if line.strip()]
+keys = {(row.get("domain"), str(row.get("task_id"))) for row in rows}
+valid = len(rows) == expected and len(keys) == expected and not any(row.get("error") for row in rows)
+raise SystemExit(0 if valid else 1)
+PY
+}
+
 if [[ -f "$ROOT/.env" ]]; then
   set -a
   source "$ROOT/.env"
   set +a
 fi
-DISTILLER_API_KEY="${DISTILLER_API_KEY:-${COMMONSTACK_API_KEY:-}}"
+DISTILLER_API_KEY="${DISTILLER_API_KEY:-EMPTY}"
 OPD_TEACHER_API_KEY="${OPD_TEACHER_API_KEY:-$DISTILLER_API_KEY}"
 
 if ! [[ "$START_CYCLE" =~ ^[0-9]+$ ]] || (( START_CYCLE >= N_CYCLES )); then
@@ -319,7 +343,7 @@ for ((cycle=START_CYCLE; cycle<N_CYCLES; cycle++)); do
   # compounding effect shows up in what gets collected, not just at final eval.
   SKILL_ARG=()
   [[ -n "$PREV_SKILLBOOK" ]] && SKILL_ARG=(--skillbook "$PREV_SKILLBOOK")
-  if [[ "$REUSE_EXISTING_ARTIFACTS" == "1" && -f "$OUT/train_traces.jsonl" && "$(wc -l < "$OUT/train_traces.jsonl")" -eq 97 ]]; then
+  if [[ "$REUSE_EXISTING_ARTIFACTS" == "1" ]] && trace_file_complete "$OUT/train_traces.jsonl" 97; then
     log "reusing complete TRAIN traces: $OUT/train_traces.jsonl"
   else
     log "collecting TRAIN traces (skillbook=${PREV_SKILLBOOK:-none})"
@@ -331,6 +355,10 @@ for ((cycle=START_CYCLE; cycle<N_CYCLES; cycle++)); do
       "${THINKING_ARGS[@]}" \
       "${SKILL_ARG[@]}" \
       --out "$OUT/train_traces.jsonl" >> "$LOG" 2>&1
+    if ! trace_file_complete "$OUT/train_traces.jsonl" 97; then
+      log "FATAL: TRAIN collection is incomplete, duplicated, or contains errors: $OUT/train_traces.jsonl" >&2
+      exit 1
+    fi
   fi
 
   # 1b. Replay failed student prefixes and let the teacher generate a verified
@@ -439,10 +467,14 @@ PYEOF
     else
       log "GRPO training (continuing from $CURRENT_ADAPTER)"
       reload_agent "$CURRENT_ADAPTER"  # keep the external eval server in sync
-      "$MERA_PY" -m tau2_evolve.prepare_grpo_data \
-        --traces "$OUT/train_traces.jsonl" --skillbook "$OUT/skillbook.json" \
-        --user-base-url "$USER_BASE_URL" "${THINKING_ARGS[@]:1}" \
-        --output "$VERL_DATA" >> "$LOG" 2>&1
+      if [[ "$REUSE_EXISTING_ARTIFACTS" == "1" && -s "$VERL_DATA" ]]; then
+        log "reusing GRPO data: $VERL_DATA"
+      else
+        "$MERA_PY" -m tau2_evolve.prepare_grpo_data \
+          --traces "$OUT/train_traces.jsonl" --skillbook "$OUT/skillbook.json" \
+          --user-base-url "$USER_BASE_URL" "${THINKING_ARGS[@]:1}" \
+          --output "$VERL_DATA" >> "$LOG" 2>&1
+      fi
       CUDA_DEVICES="$TRAIN_GPU"
       SEPARATION_ARGS=()
       if [[ -n "$ROLLOUT_GPU" ]]; then
@@ -459,6 +491,8 @@ PYEOF
         LORA_ADAPTER_PATH="$CURRENT_ADAPTER" TOTAL_STEPS="$GRPO_TOTAL_STEPS" \
         TRAIN_BATCH_SIZE="$GRPO_TRAIN_BATCH_SIZE" N_GENERATIONS="$GRPO_N_GENERATIONS" \
         ACTOR_LR="$GRPO_ACTOR_LR" MAX_RESPONSE_LENGTH="$GRPO_MAX_RESPONSE_LENGTH" \
+        PPO_MICRO_BATCH_SIZE="$GRPO_PPO_MICRO_BATCH_SIZE" SAVE_FREQ="$GRPO_SAVE_FREQ" \
+        REUSE_TRAINING_ADAPTER="$REUSE_EXISTING_ARTIFACTS" \
         "${GRPO_ARGS[@]}" "${SEPARATION_ARGS[@]}" \
         EXPERIMENT_NAME="cycle${cycle}_$(basename "$RESULTS_DIR")" \
         bash experiments/tau-2/scripts/train_verl_grpo.sh data.shuffle=False ) >> "$LOG" 2>&1
@@ -508,7 +542,7 @@ PYEOF
       log "router quality gate: need both labels, found $ROUTER_LABELS -- skipping router"
     fi
   fi
-  if [[ "$REUSE_EXISTING_ARTIFACTS" == "1" && -f "$OUT/eval.jsonl" && "$(wc -l < "$OUT/eval.jsonl")" -eq 35 ]]; then
+  if [[ "$REUSE_EXISTING_ARTIFACTS" == "1" ]] && trace_file_complete "$OUT/eval.jsonl" 35; then
     log "reusing complete held-out EVAL: $OUT/eval.jsonl"
   else
     log "held-out EVAL (35 tasks)"
@@ -520,6 +554,10 @@ PYEOF
       "${THINKING_ARGS[@]}" \
       --skillbook "$OUT/skillbook.json" \
       --out "$OUT/eval.jsonl" >> "$LOG" 2>&1
+    if ! trace_file_complete "$OUT/eval.jsonl" 35; then
+      log "FATAL: EVAL collection is incomplete, duplicated, or contains errors: $OUT/eval.jsonl" >&2
+      exit 1
+    fi
   fi
 
   if [[ -s "$ROUTER_MODEL" ]]; then

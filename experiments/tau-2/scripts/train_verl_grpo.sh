@@ -38,11 +38,14 @@ LORA_TARGET_MODULES="${LORA_TARGET_MODULES:-[q_proj,k_proj,v_proj,o_proj]}"
 SEPARATE_ROLLOUT="${SEPARATE_ROLLOUT:-0}"
 ROLLOUT_N_GPUS="${ROLLOUT_N_GPUS:-1}"
 RAY_NUM_CPUS="${RAY_NUM_CPUS:-16}"
+RAY_INCLUDE_DASHBOARD="${RAY_INCLUDE_DASHBOARD:-False}"
 CHECKPOINT_BUCKET_MB="${CHECKPOINT_BUCKET_MB:-256}"
 CHECKPOINT_BACKEND="${CHECKPOINT_BACKEND:-nccl}"
 CHECKPOINT_CUSTOM_BACKEND_MODULE="${CHECKPOINT_CUSTOM_BACKEND_MODULE:-}"
 VLLM_GDN_PREFILL_BACKEND="${VLLM_GDN_PREFILL_BACKEND:-}"
 VLLM_LANGUAGE_MODEL_ONLY="${VLLM_LANGUAGE_MODEL_ONLY:-}"
+RAY_WORKER_SETUP_HOOK="${RAY_WORKER_SETUP_HOOK:-}"
+REUSE_TRAINING_ADAPTER="${REUSE_TRAINING_ADAPTER:-0}"
 
 cd "$ROOT"
 source "$TRAIN_VENV/bin/activate"
@@ -78,8 +81,12 @@ fi
 
 if [[ "$MODEL_PATH" == *"Qwen3.5"* && -n "$LORA_ADAPTER_PATH" ]]; then
   TRAINING_ADAPTER_PATH="$OUTPUT_DIR/training_init_adapter"
-  "$TRAIN_VENV/bin/python" -m verl_code_rl.prepare_qwen35_training_adapter \
-    --input "$LORA_ADAPTER_PATH" --output "$TRAINING_ADAPTER_PATH"
+  if [[ "$REUSE_TRAINING_ADAPTER" == "1" && -s "$TRAINING_ADAPTER_PATH/adapter_model.safetensors" ]]; then
+    echo "[train_verl_grpo] reusing training adapter: $TRAINING_ADAPTER_PATH"
+  else
+    "$TRAIN_VENV/bin/python" -m verl_code_rl.prepare_qwen35_training_adapter \
+      --input "$LORA_ADAPTER_PATH" --output "$TRAINING_ADAPTER_PATH"
+  fi
   LORA_ADAPTER_PATH="$TRAINING_ADAPTER_PATH"
 fi
 
@@ -115,11 +122,14 @@ if [[ "$SEPARATE_ROLLOUT" == "1" ]]; then
     rollout.nnodes=1
     rollout.n_gpus_per_node="$ROLLOUT_N_GPUS"
     ray_kwargs.ray_init.num_cpus="$RAY_NUM_CPUS"
+    +ray_kwargs.ray_init.include_dashboard="$RAY_INCLUDE_DASHBOARD"
     actor_rollout_ref.rollout.checkpoint_engine.backend="$CHECKPOINT_BACKEND"
     actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes="$CHECKPOINT_BUCKET_MB"
   )
   [[ -n "$CHECKPOINT_CUSTOM_BACKEND_MODULE" ]] && \
     SEPARATION_ARGS+=(actor_rollout_ref.rollout.checkpoint_engine.custom_backend_module="$CHECKPOINT_CUSTOM_BACKEND_MODULE")
+  [[ -n "$RAY_WORKER_SETUP_HOOK" ]] && \
+    SEPARATION_ARGS+=(+ray_kwargs.ray_init.runtime_env.worker_process_setup_hook="$RAY_WORKER_SETUP_HOOK")
 fi
 
 python -m "$TRAIN_ENTRYPOINT" \
