@@ -6,7 +6,7 @@ root:
 ```bash
 scripts/run_experiment.sh --list
 scripts/run_experiment.sh humaneval_mbpp skills
-scripts/run_experiment.sh tau2 sft-grpo
+scripts/run_experiment.sh tau2 4cycle
 ```
 
 The numbered files below are stable recipe implementations. They remain
@@ -97,3 +97,22 @@ bash experiments/humaneval_mbpp/03_grpo_only.sh` for a fast smoke run.
   numbers meaningful (a router-gated cascade, not "run both and see who
   wins") -- see `CLAUDE.md`'s "One evolve cycle" section for the full
   rationale.
+
+## tau-2/
+
+Use `06_4cycle.sh` through the common launcher for the validated full run:
+
+```bash
+AGENT_GPU=0 AGENT_PORT=8260 \
+USER_GPU=1 USER_PORT=8261 \
+TRAIN_GPU=2 ROLLOUT_GPU=3 \
+  scripts/run_experiment.sh tau2 4cycle
+```
+
+This recipe starts its own Qwen3.5-2B student and Qwen3.5-4B user/teacher
+servers. Each cycle collects current-student trajectories, replays failed
+prefixes with the local teacher, trains SFT only on verified continuations,
+runs VERL GRPO, trains the escalation router, and evaluates the fixed held-out
+split. `02_sft_only.sh`, `03_grpo_only.sh`, and `04_sft_grpo.sh` remain the
+lower-level ablation/custom-run entry points. See `tau-2/README.md` and
+`CLAUDE.md` for environment setup and resume commands.

@@ -10,6 +10,7 @@ scripts/run_experiment.sh tau2 skills
 scripts/run_experiment.sh tau2 sft
 scripts/run_experiment.sh tau2 grpo
 scripts/run_experiment.sh tau2 sft-grpo
+scripts/run_experiment.sh tau2 4cycle
 ```
 
 The numbered scripts are the public experiment entry points:
@@ -17,7 +18,10 @@ The numbered scripts are the public experiment entry points:
 1. `01_skills_only.sh`: SkillBook ablation with no model training.
 2. `02_sft_only.sh`: multi-cycle SkillBook + verl SFT, without GRPO.
 3. `03_grpo_only.sh`: strict Qwen3.5 verl GRPO, without SkillBook or SFT.
-4. `04_sft_grpo.sh`: multi-cycle SkillBook + verl SFT + verl GRPO.
+4. `04_sft_grpo.sh`: generic multi-cycle SkillBook + verl SFT + verl GRPO.
+5. `05_fallback_4b_smoke.sh`: one-task Qwen3.5-4B runtime smoke test.
+6. `06_4cycle.sh`: recommended Qwen3.5 OPD + SkillBook + SFT + GRPO + router
+   four-cycle reproduction.
 
 Everything else is an implementation detail:
 
@@ -41,6 +45,11 @@ AGENT_GPU=2 AGENT_PORT=8210 \
 USER_GPU=3 USER_PORT=8211 \
 TRAIN_GPU=5 N_CYCLES=4 \
 scripts/run_experiment.sh tau2 sft-grpo
+
+AGENT_GPU=0 AGENT_PORT=8260 \
+USER_GPU=1 USER_PORT=8261 \
+TRAIN_GPU=2 ROLLOUT_GPU=3 \
+scripts/run_experiment.sh tau2 4cycle
 ```
 
 For Qwen3.5 GRPO-only, first create a strict, domain-interleaved parquet. Do
@@ -65,8 +74,9 @@ run-specific resume script.
 
 ## Pipeline
 
-The legacy four-cycle tau2 training pipeline defaults to
-`Qwen/Qwen2.5-1.5B-Instruct`. Model and environment variables can override it:
+The recommended four-cycle pipeline uses `Qwen/Qwen3.5-2B` as the student and
+`Qwen/Qwen3.5-4B` as the local user simulator, OPD teacher, distiller, and
+routed fallback. Model and endpoint variables remain overridable:
 
 1. Collect unbiased TRAIN trajectories with the current LoRA.
 2. Replay failed student decision prefixes and ask the configured OPD teacher
@@ -83,9 +93,9 @@ The legacy four-cycle tau2 training pipeline defaults to
 telecom sampling by default. The held-out evaluator still uses the official
 tau2 reward; action recall only shapes training and filters demonstrations.
 
-Skillbook distillation and OPD correction use GPT-5.5 through CommonStack by
-default. The student and user simulator remain local. Override the
-`DISTILLER_*` and `OPD_TEACHER_*` variables to use other endpoints.
+SkillBook distillation and OPD correction use the local 4B endpoint by
+default, so the full recipe does not require a hosted-model key. Override
+`DISTILLER_*` and `OPD_TEACHER_*` to use other endpoints.
 
 The external tau2-stage2 checkout defaults to a sibling directory named
 `router-skills-evolve` next to this repository. Override `TAU2_WORKSPACE`,

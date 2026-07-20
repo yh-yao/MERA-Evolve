@@ -17,6 +17,7 @@ declare -A RECIPES=(
   ["tau2:grpo"]="experiments/tau-2/03_grpo_only.sh"
   ["tau2:sft-grpo"]="experiments/tau-2/04_sft_grpo.sh"
   ["tau2:fallback-smoke"]="experiments/tau-2/05_fallback_4b_smoke.sh"
+  ["tau2:4cycle"]="experiments/tau-2/06_4cycle.sh"
 )
 
 usage() {

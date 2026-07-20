@@ -57,15 +57,25 @@ logic remains in its adapter.
 ```bash
 scripts/run_experiment.sh --list
 scripts/run_experiment.sh humaneval_mbpp skills
-scripts/run_experiment.sh tau2 sft-grpo --dry-run
+scripts/run_experiment.sh tau2 4cycle --dry-run
 ```
 
 For a real four-cycle TAU-2 run, set `TAU2_WORKSPACE`, `TRAIN_VENV`, model,
 GPU, port, and `RESULTS_DIR` variables as shown in `CLAUDE.md`, then run:
 
 ```bash
-scripts/run_experiment.sh tau2 sft-grpo
+AGENT_GPU=0 AGENT_PORT=8260 \
+USER_GPU=1 USER_PORT=8261 \
+TRAIN_GPU=2 ROLLOUT_GPU=3 \
+  scripts/run_experiment.sh tau2 4cycle
 ```
+
+The `tau2 4cycle` recipe pins the validated Qwen3.5 setup: a 2B student,
+local 4B user/teacher, prefix-conditioned OPD, SkillBook, SFT, GRPO, router,
+and held-out evaluation. HumanEval/MBPP uses current-student failure mining
+but its large teacher solves the original prompt independently; only its
+self-repair rows preserve the student trajectory. TAU-2 is therefore the
+strict on-policy-distillation implementation.
 
 ## Prepare Data
 

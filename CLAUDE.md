@@ -218,10 +218,9 @@ export USER_MODEL_PATH=Qwen/Qwen3.5-4B
 export AGENT_GPU=0 AGENT_PORT=8260
 export USER_GPU=1 USER_PORT=8261
 export TRAIN_GPU=2 ROLLOUT_GPU=3
-export N_CYCLES=4
 export RESULTS_DIR=$PWD/results/tau2_qwen35_$(date -u +%Y%m%d_%H%M%S)
 
-scripts/run_experiment.sh tau2 sft-grpo
+scripts/run_experiment.sh tau2 4cycle
 ```
 
 Available TAU-2 recipes:
@@ -229,12 +228,17 @@ Available TAU-2 recipes:
 ```bash
 scripts/run_experiment.sh tau2 skills
 scripts/run_experiment.sh tau2 sft
+scripts/run_experiment.sh tau2 sft-grpo
+scripts/run_experiment.sh tau2 4cycle
 TRAIN_FILE=/absolute/path/to/results/run/verl_grpo.parquet \
 TRAIN_GPU=2 ROLLOUT_GPU=3 scripts/run_experiment.sh tau2 grpo
 FALLBACK_GPU=2 USER_PORT=8261 scripts/run_experiment.sh tau2 fallback-smoke
 ```
 
-The `sft` and `sft-grpo` recipes execute this cycle:
+`4cycle` is the recommended reproducible full run. It fixes `N_CYCLES=4`,
+Qwen3.5-2B/4B model defaults, separate training and rollout GPUs, local OPD,
+and the validated worker/training settings. `sft` and `sft-grpo` remain
+generic wrappers for ablations and custom cycle counts. The full cycle is:
 
 1. run all 97 TRAIN tasks with the current student and no independent fallback;
 2. replay failed prefixes with the OPD teacher and retain only verified fixes;
@@ -244,10 +248,10 @@ The `sft` and `sft-grpo` recipes execute this cycle:
 6. rerun TRAIN, train the escalation router, and evaluate 35 held-out tasks;
 7. carry the adapter and SkillBook into the next cycle.
 
-Defaults use GPT-5.5 through CommonStack for OPD and skill distillation. The
-student is local Qwen3.5-2B and the user simulator is local Qwen3.5-4B. Override
-`OPD_TEACHER_*` and `DISTILLER_*` to change remote teachers. Router-gated
-evaluation also uses `OPD_TEACHER_*` as its escalation endpoint.
+The recommended recipe uses the local Qwen3.5-4B server for user simulation,
+OPD, SkillBook distillation, and routed fallback; no hosted teacher is needed.
+Override `OPD_TEACHER_*` and `DISTILLER_*` to use another OpenAI-compatible
+endpoint. Router-gated evaluation uses `OPD_TEACHER_*` for escalation.
 
 Important tuning variables include `COLLECT_WORKERS`, `EVAL_WORKERS`,
 `OPD_WORKERS`, `OPD_BRANCH_ATTEMPTS`, `SFT_LR`, `SFT_TOTAL_EPOCHS`,
@@ -266,7 +270,7 @@ export START_CYCLE=1
 export REUSE_EXISTING_ARTIFACTS=1
 export INITIAL_ADAPTER="$(cat "$RESULTS_DIR/cycle_0/verl_grpo/final_adapter_path.txt")"
 export INITIAL_SKILLBOOK=/absolute/path/to/cycle_0/skillbook.json
-scripts/run_experiment.sh tau2 sft-grpo
+scripts/run_experiment.sh tau2 4cycle
 ```
 
 For a failure inside the current cycle, set `START_CYCLE` to that cycle and
