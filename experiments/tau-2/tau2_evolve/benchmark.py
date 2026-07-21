@@ -217,12 +217,20 @@ def make_llm_spec(
     api_base: str,
     api_key: str = "EMPTY",
     *,
+    temperature: float = 0.0,
     enable_thinking: bool | None = None,
     max_tokens: int | None = None,
 ):
     from core.schemas.artifacts import LLMSpec
 
-    args: dict[str, Any] = {"api_base": api_base, "api_key": api_key}
+    # TextRunConfig forwards these arguments verbatim instead of merging the
+    # tau2 defaults. Set greedy decoding explicitly so evaluation remains
+    # reproducible across OpenAI-compatible backends.
+    args: dict[str, Any] = {
+        "api_base": api_base,
+        "api_key": api_key,
+        "temperature": temperature,
+    }
     if max_tokens is not None:
         args["max_tokens"] = max_tokens
     if enable_thinking is not None:

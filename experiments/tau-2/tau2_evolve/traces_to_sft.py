@@ -158,11 +158,36 @@ def _balance_domains(rows: list[dict], seed: int = 42) -> list[dict]:
     return balanced
 
 
+def _deduplicate_tasks(rows: list[dict]) -> list[dict]:
+    """Keep the newest preferred trajectory for each benchmark task.
+
+    Callers pass current-cycle student successes and OPD repairs before older
+    cycle traces. Preserving the first row therefore prevents repeated tasks
+    from receiving progressively more weight across cycles without discarding
+    a current repair in favor of stale history.
+    """
+    seen: set[tuple[str, str]] = set()
+    unique = []
+    for row in rows:
+        key = (row["domain"], str(row["task_id"]))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(row)
+    return unique
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--traces", type=Path, action="append", required=True)
     ap.add_argument("--output", type=Path, required=True)
     ap.add_argument("--balance-domains", action="store_true")
+    ap.add_argument(
+        "--deduplicate-tasks",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="keep only the first trajectory for each domain/task (default: true)",
+    )
     args = ap.parse_args()
 
     rows_out = []
@@ -206,6 +231,9 @@ def main() -> int:
     n_fallback = sum(r["fallback_used"] for r in rows_out)
     n_opd = sum(r["opd_used"] for r in rows_out)
     n_unbalanced = len(rows_out)
+    if args.deduplicate_tasks:
+        rows_out = _deduplicate_tasks(rows_out)
+    n_unique = len(rows_out)
     if args.balance_domains:
         rows_out = _balance_domains(rows_out)
     print(
@@ -215,8 +243,10 @@ def main() -> int:
         f"excluded {n_incomplete} passed but action-incomplete and "
         f"{n_without_target} without assistant targets)"
     )
+    if args.deduplicate_tasks:
+        print(f"[traces_to_sft] task-deduplicated {n_unbalanced} -> {n_unique} rows")
     if args.balance_domains:
-        print(f"[traces_to_sft] domain-balanced {n_unbalanced} -> {len(rows_out)} rows")
+        print(f"[traces_to_sft] domain-balanced {n_unique} -> {len(rows_out)} rows")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(rows_out).to_parquet(args.output)
     print(f"[traces_to_sft] wrote {args.output}")

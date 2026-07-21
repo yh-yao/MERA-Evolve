@@ -89,8 +89,9 @@ GRPO_PPO_MICRO_BATCH_SIZE="${GRPO_PPO_MICRO_BATCH_SIZE:-2}"
 GRPO_SAVE_FREQ="${GRPO_SAVE_FREQ:-2}"
 REUSE_EXISTING_ARTIFACTS="${REUSE_EXISTING_ARTIFACTS:-0}"
 SFT_MIN_ROWS="${SFT_MIN_ROWS:-12}"
-SFT_LR="${SFT_LR:-1e-6}"
+SFT_LR="${SFT_LR:-}"
 SFT_TOTAL_EPOCHS="${SFT_TOTAL_EPOCHS:-1}"
+SFT_BALANCE_DOMAINS="${SFT_BALANCE_DOMAINS:-0}"
 SFT_MAX_LENGTH_DEFAULT=12288
 
 MODEL_ARGS=()
@@ -99,6 +100,9 @@ SFT_ARGS=()
 GRPO_ARGS=()
 AGENT_TOKEN_ARGS=()
 if [[ "$BASE_MODEL" == *"Qwen3.5"* ]]; then
+  # The OPD set is small and multi-turn trajectories are highly correlated.
+  # A conservative LR avoids the policy drift observed at 1e-6 and 3e-7.
+  SFT_LR="${SFT_LR:-1e-7}"
   # Non-thinking tool calls should be concise. Without a bound, malformed
   # turns can generate many thousands of tokens and exhaust the conversation
   # context before max_steps is reached.
@@ -146,6 +150,7 @@ if [[ "$BASE_MODEL" == *"Qwen3.5"* ]]; then
     RAY_WORKER_SETUP_HOOK=tau2_evolve.qwen35_worker_setup.install_qwen35_worker_patches
   )
 fi
+SFT_LR="${SFT_LR:-1e-6}"
 [[ -n "$AGENT_MAX_TOKENS" ]] && AGENT_TOKEN_ARGS=(--agent-max-tokens "$AGENT_MAX_TOKENS")
 
 mkdir -p "$RESULTS_DIR"
@@ -187,6 +192,10 @@ for worker_setting in COLLECT_WORKERS EVAL_WORKERS; do
     exit 2
   fi
 done
+[[ "$SFT_BALANCE_DOMAINS" == "0" || "$SFT_BALANCE_DOMAINS" == "1" ]] || {
+  log "FATAL: SFT_BALANCE_DOMAINS must be 0 or 1 (got: $SFT_BALANCE_DOMAINS)" >&2
+  exit 2
+}
 [[ -z "$INITIAL_ADAPTER" || -s "$INITIAL_ADAPTER/adapter_model.safetensors" ]] || {
   log "FATAL: INITIAL_ADAPTER is not a loadable LoRA adapter: $INITIAL_ADAPTER" >&2
   exit 2
@@ -215,6 +224,7 @@ done
   "user_max_model_len=$USER_MAX_MODEL_LEN" \
   "opd_workers=$OPD_WORKERS" "opd_branch_attempts=$OPD_BRANCH_ATTEMPTS" \
   "sft_lr=$SFT_LR" "sft_total_epochs=$SFT_TOTAL_EPOCHS" \
+  "sft_balance_domains=$SFT_BALANCE_DOMAINS" \
   "grpo_total_steps=$GRPO_TOTAL_STEPS" \
   "grpo_train_batch_size=$GRPO_TRAIN_BATCH_SIZE" \
   "grpo_n_generations=$GRPO_N_GENERATIONS" "grpo_actor_lr=$GRPO_ACTOR_LR" <<'PY'
@@ -414,8 +424,11 @@ for ((cycle=START_CYCLE; cycle<N_CYCLES; cycle++)); do
       [[ -s "$PREV_OUT/train_traces.jsonl" ]] && SFT_TRACE_ARGS+=(--traces "$PREV_OUT/train_traces.jsonl")
       [[ -s "$PREV_OUT/opd_traces.jsonl" ]] && SFT_TRACE_ARGS+=(--traces "$PREV_OUT/opd_traces.jsonl")
     fi
+    SFT_BALANCE_ARGS=()
+    [[ "$SFT_BALANCE_DOMAINS" == "1" ]] && SFT_BALANCE_ARGS=(--balance-domains)
     "$MERA_PY" -m tau2_evolve.traces_to_sft \
-      "${SFT_TRACE_ARGS[@]}" --balance-domains --output "$OUT/sft_pairs.parquet" >> "$LOG" 2>&1
+      "${SFT_TRACE_ARGS[@]}" "${SFT_BALANCE_ARGS[@]}" \
+      --output "$OUT/sft_pairs.parquet" >> "$LOG" 2>&1
   fi
 
   SFT_ROWS="$($MERA_PY - "$OUT/sft_pairs.parquet" <<'PYEOF'

@@ -255,9 +255,18 @@ endpoint. Router-gated evaluation uses `OPD_TEACHER_*` for escalation.
 
 Important tuning variables include `COLLECT_WORKERS`, `EVAL_WORKERS`,
 `OPD_WORKERS`, `OPD_BRANCH_ATTEMPTS`, `SFT_LR`, `SFT_TOTAL_EPOCHS`,
+`SFT_BALANCE_DOMAINS`,
 `GRPO_TOTAL_STEPS`, `GRPO_TRAIN_BATCH_SIZE`, `GRPO_N_GENERATIONS`, and
 `GRPO_ACTOR_LR`. Start with repository defaults; worker counts depend on CPU,
 endpoint rate limits, and vLLM queue capacity.
+
+For Qwen3.5, the default SFT learning rate is `1e-7` for one epoch. SFT rows
+are deduplicated by benchmark task and domain oversampling is disabled by
+default; use `SFT_BALANCE_DOMAINS=1` only for a deliberate ablation.
+
+tau2 agent and user-simulator API requests set `temperature=0.0` explicitly
+for reproducible collection and evaluation. This does not change verl's GRPO
+rollout temperature, which is controlled by the GRPO recipe.
 
 ### Resume TAU-2
 

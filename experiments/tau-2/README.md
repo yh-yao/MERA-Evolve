@@ -93,6 +93,17 @@ routed fallback. Model and endpoint variables remain overridable:
 telecom sampling by default. The held-out evaluator still uses the official
 tau2 reward; action recall only shapes training and filters demonstrations.
 
+SFT keeps the first current-cycle trajectory for each `(domain, task_id)` and
+does not oversample domains by default. This avoids repeatedly weighting the
+same small set of OPD repairs across cycles. The recommended Qwen3.5 recipe
+uses `SFT_LR=1e-7` for one epoch; set `SFT_BALANCE_DOMAINS=1` only for an
+explicit oversampling ablation.
+
+Agent and user-simulator requests explicitly use `temperature=0.0`, matching
+the tau2 evaluation default instead of relying on backend-specific API
+defaults. verl GRPO rollout sampling remains stochastic and is configured
+separately by the GRPO training recipe.
+
 SkillBook distillation and OPD correction use the local 4B endpoint by
 default, so the full recipe does not require a hosted-model key. Override
 `DISTILLER_*` and `OPD_TEACHER_*` to use other endpoints.

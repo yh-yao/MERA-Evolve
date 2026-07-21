@@ -94,6 +94,15 @@ def test_qwen_thinking_flag_is_forwarded_to_chat_template() -> None:
     assert spec.args["extra_body"] == {
         "chat_template_kwargs": {"enable_thinking": False}
     }
+    assert spec.args["temperature"] == 0.0
+
+
+def test_tau2_temperature_can_be_overridden() -> None:
+    spec = benchmark.make_llm_spec(
+        "openai/qwen3", "http://localhost:8000/v1", temperature=0.3
+    )
+
+    assert spec.args["temperature"] == 0.3
 
 
 def test_verl_state_evaluator_is_an_instance_method() -> None:
@@ -168,6 +177,16 @@ def test_sft_domain_balancing_is_deterministic() -> None:
         "retail": 2,
         "telecom": 2,
     }
+
+
+def test_sft_task_deduplication_preserves_first_trajectory() -> None:
+    rows = [
+        {"domain": "retail", "task_id": 1, "source": "current"},
+        {"domain": "airline", "task_id": "1", "source": "current"},
+        {"domain": "retail", "task_id": "1", "source": "old"},
+    ]
+
+    assert traces_to_sft._deduplicate_tasks(rows) == rows[:2]
 
 
 def test_grpo_domain_balancing_is_interleaved() -> None:
