@@ -35,7 +35,15 @@ def load_examples(path: Path) -> tuple[list[str], list[int], int]:
                 skipped += 1
                 continue
             prompts.append(prompt)
-            labels.append(0 if small_success else 1)
+            large_success = row.get("large_success")
+            # Route only when the large endpoint can rescue a small failure.
+            # If both endpoints fail, paying for the large endpoint is not a
+            # useful routing action. Preserve the old target for legacy rows
+            # that do not contain a measured large outcome.
+            need_large = (not small_success) and (
+                bool(large_success) if isinstance(large_success, bool) else True
+            )
+            labels.append(int(need_large))
     return prompts, labels, skipped
 
 
@@ -65,9 +73,13 @@ def load_binomial_examples(path: Path) -> tuple[list[str], list[int], list[str],
                     continue
                 passed = int(success)
             passed = max(0, min(passed, n))
+            large_success = row.get("large_success")
+            rescued_failures = n - passed
+            if isinstance(large_success, bool) and not large_success:
+                rescued_failures = 0
             task_id = str(row.get("task_id") or f"line-{line_no}")
             prompts.extend([prompt] * n)
-            labels.extend([0] * passed + [1] * (n - passed))
+            labels.extend([0] * (n - rescued_failures) + [1] * rescued_failures)
             groups.extend([task_id] * n)
     return prompts, labels, groups, skipped
 
@@ -140,6 +152,7 @@ def train(
             "0_small_ok": labels.count(0),
             "1_need_large": labels.count(1),
         },
+        "label_definition": "small_failure_rescued_by_large",
         "threshold_default": 0.5,
         "seed": seed,
     }

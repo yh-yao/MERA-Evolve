@@ -8,6 +8,9 @@ PORT="${PORT:-8000}"
 GPU="${GPU:-0}"
 SERVED_NAME="${SERVED_NAME:-$MODEL}"
 VLLM_BIN="${VLLM_BIN:-vllm}"
+if [[ "$VLLM_BIN" == */* ]]; then
+  export PATH="$(dirname "$VLLM_BIN"):$PATH"
+fi
 LOG_DIR="${LOG_DIR:-results/vllm_logs}"
 mkdir -p "$LOG_DIR"
 
@@ -23,6 +26,17 @@ LOG_FILE="$LOG_DIR/vllm_${SAFE_NAME}_${PORT}.log"
 ENFORCE_EAGER="${ENFORCE_EAGER:-1}"
 EAGER_ARGS=()
 [[ "$ENFORCE_EAGER" == "1" ]] && EAGER_ARGS=(--enforce-eager)
+CHAT_TEMPLATE_ARGS=()
+if [[ -n "${VLLM_ENABLE_THINKING:-}" ]]; then
+  CHAT_TEMPLATE_ARGS=(
+    --default-chat-template-kwargs
+    "{\"enable_thinking\":${VLLM_ENABLE_THINKING}}"
+  )
+fi
+SCHEDULER_ARGS=()
+[[ -n "${VLLM_MAX_NUM_SEQS:-}" ]] && SCHEDULER_ARGS+=(--max-num-seqs "$VLLM_MAX_NUM_SEQS")
+[[ -n "${VLLM_MAX_NUM_BATCHED_TOKENS:-}" ]] && \
+  SCHEDULER_ARGS+=(--max-num-batched-tokens "$VLLM_MAX_NUM_BATCHED_TOKENS")
 
 LORA_ARGS=()
 MODEL_TO_LOAD="$MODEL"
@@ -35,6 +49,22 @@ PY
 )"
   MODEL_TO_LOAD="$BASE"
   LORA_ARGS=(--enable-lora --lora-modules "$SERVED_NAME=$MODEL")
+fi
+
+# Adapter paths do not normally contain the base model name, so identify
+# Qwen3.5 only after resolving adapter_config.json's base_model_name_or_path.
+MODEL_ARGS=()
+if [[ "$MODEL_TO_LOAD" == *"Qwen3.5"* ]]; then
+  QWEN35_COMPAT="$PWD/experiments/tau-2/compat/qwen35_torch_fallback"
+  export PYTHONPATH="$QWEN35_COMPAT:${PYTHONPATH:-}"
+  MODEL_ARGS=(
+    --language-model-only
+    --gdn-prefill-backend "${VLLM_GDN_PREFILL_BACKEND:-flashinfer}"
+  )
+  # vLLM 0.18's asynchronous scheduler can leave a dynamic batch of Qwen3.5
+  # GDN decode requests spinning at 100% GPU with zero token throughput. The
+  # synchronous scheduler is stable under the same concurrent workload.
+  [[ "${VLLM_ASYNC_SCHEDULING:-0}" == "1" ]] || MODEL_ARGS+=(--no-async-scheduling)
 fi
 
 # Default on: this node's driver caps out below what flashinfer's JIT-compiled
@@ -54,6 +84,9 @@ CUDA_VISIBLE_DEVICES="$GPU" \
     --dtype "${VLLM_DTYPE:-bfloat16}" \
     --trust-remote-code \
     "${LORA_ARGS[@]}" \
+    "${MODEL_ARGS[@]}" \
+    "${CHAT_TEMPLATE_ARGS[@]}" \
+    "${SCHEDULER_ARGS[@]}" \
     "${EAGER_ARGS[@]}" \
     > "$LOG_FILE" 2>&1 &
 

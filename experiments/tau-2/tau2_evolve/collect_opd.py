@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -55,7 +56,7 @@ def main() -> int:
     parser.add_argument("--skillbook", type=Path)
     parser.add_argument("--teacher-model", required=True)
     parser.add_argument("--teacher-base-url", required=True)
-    parser.add_argument("--teacher-api-key", default="EMPTY")
+    parser.add_argument("--teacher-api-key", default=os.environ.get("OPD_TEACHER_API_KEY", "EMPTY"))
     parser.add_argument("--teacher-max-tokens", type=int, default=1024)
     parser.add_argument("--user-model", default="openai/evol-llm-user")
     parser.add_argument("--user-base-url", required=True)

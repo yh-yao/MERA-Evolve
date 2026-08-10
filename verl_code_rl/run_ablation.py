@@ -28,7 +28,11 @@ def labels_for(traces: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list
         small_success = row.get("small_success")
         if isinstance(small_success, bool):
             kept.append(row)
-            labels.append(0 if small_success else 1)
+            large_success = row.get("large_success")
+            need_large = (not small_success) and (
+                bool(large_success) if isinstance(large_success, bool) else True
+            )
+            labels.append(int(need_large))
     return kept, labels
 
 

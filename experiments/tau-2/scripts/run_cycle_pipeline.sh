@@ -80,6 +80,8 @@ DEFAULT_SERVER_MAX_MODEL_LEN=32768
 [[ "$BASE_MODEL" == *"Qwen3.5"* ]] && DEFAULT_SERVER_MAX_MODEL_LEN=40960
 AGENT_MAX_MODEL_LEN="${AGENT_MAX_MODEL_LEN:-$DEFAULT_SERVER_MAX_MODEL_LEN}"
 USER_MAX_MODEL_LEN="${USER_MAX_MODEL_LEN:-$DEFAULT_SERVER_MAX_MODEL_LEN}"
+AGENT_SERVER_GPU_MEMORY_UTILIZATION="${AGENT_SERVER_GPU_MEMORY_UTILIZATION:-0.5}"
+USER_SERVER_GPU_MEMORY_UTILIZATION="${USER_SERVER_GPU_MEMORY_UTILIZATION:-0.5}"
 GRPO_TOTAL_STEPS="${GRPO_TOTAL_STEPS:-10}"
 GRPO_TRAIN_BATCH_SIZE="${GRPO_TRAIN_BATCH_SIZE:-8}"
 GRPO_N_GENERATIONS="${GRPO_N_GENERATIONS:-4}"
@@ -88,6 +90,7 @@ GRPO_MAX_RESPONSE_LENGTH="${GRPO_MAX_RESPONSE_LENGTH:-2048}"
 GRPO_PPO_MICRO_BATCH_SIZE="${GRPO_PPO_MICRO_BATCH_SIZE:-2}"
 GRPO_SAVE_FREQ="${GRPO_SAVE_FREQ:-2}"
 REUSE_EXISTING_ARTIFACTS="${REUSE_EXISTING_ARTIFACTS:-0}"
+REUSE_POSTTRAIN_AS_NEXT_CYCLE="${REUSE_POSTTRAIN_AS_NEXT_CYCLE:-1}"
 SFT_MIN_ROWS="${SFT_MIN_ROWS:-12}"
 SFT_LR="${SFT_LR:-}"
 SFT_TOTAL_EPOCHS="${SFT_TOTAL_EPOCHS:-1}"
@@ -122,6 +125,7 @@ if [[ "$BASE_MODEL" == *"Qwen3.5"* ]]; then
   MODEL_ARGS=(--language-model-only --gdn-prefill-backend "${EXTERNAL_GDN_PREFILL_BACKEND:-flashinfer}")
   THINKING_ARGS=(--no-agent-thinking --no-user-thinking)
   SFT_ARGS=(
+    QWEN35_ENABLE_VERL_PATCHES=1
     PYTHONPATH="$QWEN35_TRAIN_TRITON_OVERLAY:$PYTHONPATH"
     FLA_TILELANG=0
     SFT_ENABLE_THINKING=False
@@ -138,13 +142,14 @@ if [[ "$BASE_MODEL" == *"Qwen3.5"* ]]; then
     SFT_SAVE_FREQ="${SFT_SAVE_FREQ:-3}"
   )
   GRPO_ARGS=(
+    QWEN35_ENABLE_VERL_PATCHES=1
     TRAIN_VENV="$TRAIN_VENV"
     AGENT_THINKING=False
     MODEL_ATTN_IMPLEMENTATION=sdpa
     USE_REMOVE_PADDING=False
     ROLLOUT_TEMPERATURE=1.0
     ROLLOUT_TOP_P=0.98
-    ROLLOUT_GPU_MEMORY_UTILIZATION=0.70
+    ROLLOUT_GPU_MEMORY_UTILIZATION="${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.70}"
     VLLM_GDN_PREFILL_BACKEND=triton
     VLLM_LANGUAGE_MODEL_ONLY=True
     RAY_WORKER_SETUP_HOOK=tau2_evolve.qwen35_worker_setup.install_qwen35_worker_patches
@@ -180,6 +185,7 @@ if [[ -f "$ROOT/.env" ]]; then
 fi
 DISTILLER_API_KEY="${DISTILLER_API_KEY:-EMPTY}"
 OPD_TEACHER_API_KEY="${OPD_TEACHER_API_KEY:-$DISTILLER_API_KEY}"
+export DISTILLER_API_KEY OPD_TEACHER_API_KEY
 
 if ! [[ "$START_CYCLE" =~ ^[0-9]+$ ]] || (( START_CYCLE >= N_CYCLES )); then
   log "FATAL: START_CYCLE must be an integer in [0, $((N_CYCLES - 1))] (got: $START_CYCLE)" >&2
@@ -222,9 +228,12 @@ done
   "agent_max_tokens=$AGENT_MAX_TOKENS" \
   "agent_max_model_len=$AGENT_MAX_MODEL_LEN" \
   "user_max_model_len=$USER_MAX_MODEL_LEN" \
+  "agent_server_gpu_memory_utilization=$AGENT_SERVER_GPU_MEMORY_UTILIZATION" \
+  "user_server_gpu_memory_utilization=$USER_SERVER_GPU_MEMORY_UTILIZATION" \
   "opd_workers=$OPD_WORKERS" "opd_branch_attempts=$OPD_BRANCH_ATTEMPTS" \
   "sft_lr=$SFT_LR" "sft_total_epochs=$SFT_TOTAL_EPOCHS" \
   "sft_balance_domains=$SFT_BALANCE_DOMAINS" \
+  "reuse_posttrain_as_next_cycle=$REUSE_POSTTRAIN_AS_NEXT_CYCLE" \
   "grpo_total_steps=$GRPO_TOTAL_STEPS" \
   "grpo_train_batch_size=$GRPO_TRAIN_BATCH_SIZE" \
   "grpo_n_generations=$GRPO_N_GENERATIONS" "grpo_actor_lr=$GRPO_ACTOR_LR" <<'PY'
@@ -260,7 +269,7 @@ start_agent_server() {
     nohup "$VLLM_BIN" serve "$serve_model" \
     --served-model-name evol-llm-agent \
     --enable-lora --max-lora-rank 16 \
-    --port "$port" --gpu-memory-utilization 0.5 --max-model-len "$AGENT_MAX_MODEL_LEN" \
+    --port "$port" --gpu-memory-utilization "$AGENT_SERVER_GPU_MEMORY_UTILIZATION" --max-model-len "$AGENT_MAX_MODEL_LEN" \
     --max-num-batched-tokens "$AGENT_MAX_MODEL_LEN" --enable-prefix-caching \
     --dtype bfloat16 --trust-remote-code --enforce-eager \
     "${MODEL_ARGS[@]}" \
@@ -293,7 +302,7 @@ start_user_server() {
   CUDA_VISIBLE_DEVICES="$gpu" VLLM_USE_FLASHINFER_SAMPLER=0 \
     nohup "$VLLM_BIN" serve "$serve_model" \
     --served-model-name evol-llm-user \
-    --port "$port" --gpu-memory-utilization 0.5 --max-model-len "$USER_MAX_MODEL_LEN" \
+    --port "$port" --gpu-memory-utilization "$USER_SERVER_GPU_MEMORY_UTILIZATION" --max-model-len "$USER_MAX_MODEL_LEN" \
     --max-num-batched-tokens "$USER_MAX_MODEL_LEN" --enable-prefix-caching \
     --dtype bfloat16 --trust-remote-code --enforce-eager \
     "${MODEL_ARGS[@]}" \
@@ -361,8 +370,15 @@ for ((cycle=START_CYCLE; cycle<N_CYCLES; cycle++)); do
   # compounding effect shows up in what gets collected, not just at final eval.
   SKILL_ARG=()
   [[ -n "$PREV_SKILLBOOK" ]] && SKILL_ARG=(--skillbook "$PREV_SKILLBOOK")
+  PREV_OUT=""
+  (( cycle > 0 )) && PREV_OUT="$RESULTS_DIR/cycle_$((cycle - 1))"
   if [[ "$REUSE_EXISTING_ARTIFACTS" == "1" ]] && trace_file_complete "$OUT/train_traces.jsonl" 97; then
     log "reusing complete TRAIN traces: $OUT/train_traces.jsonl"
+  elif [[ "$REUSE_POSTTRAIN_AS_NEXT_CYCLE" == "1" && -n "$PREV_OUT" ]] && \
+       trace_file_complete "$PREV_OUT/system_train.jsonl" 97; then
+    cp "$PREV_OUT/system_train.jsonl" "$OUT/train_traces.jsonl"
+    printf '%s\n' "$PREV_OUT/system_train.jsonl" > "$OUT/train_traces.reused_from"
+    log "reused previous post-train TRAIN rollout: $PREV_OUT/system_train.jsonl"
   else
     log "collecting TRAIN traces (skillbook=${PREV_SKILLBOOK:-none})"
     "$TAU2_PY" -m tau2_evolve.collect_traces \
@@ -387,12 +403,19 @@ for ((cycle=START_CYCLE; cycle<N_CYCLES; cycle++)); do
   if [[ "$ENABLE_OPD" == "1" ]]; then
     if [[ "$REUSE_EXISTING_ARTIFACTS" == "1" && -f "$OPD_TRACES" && -f "$ROUTER_DATA" ]]; then
       log "reusing OPD traces and router data"
+    elif [[ "$REUSE_POSTTRAIN_AS_NEXT_CYCLE" == "1" && -n "$PREV_OUT" && \
+            -f "$PREV_OUT/router_teacher_rescues.jsonl" && \
+            -f "$PREV_OUT/router_data_posttrain.jsonl" ]]; then
+      cp "$PREV_OUT/router_teacher_rescues.jsonl" "$OPD_TRACES"
+      cp "$PREV_OUT/router_data_posttrain.jsonl" "$ROUTER_DATA"
+      printf '%s\n' "$PREV_OUT" > "$OUT/opd_traces.reused_from"
+      log "reused previous post-train teacher rescues and router labels"
     else
       log "collecting verified OPD teacher suffixes"
       "$TAU2_PY" -m tau2_evolve.collect_opd \
         --traces "$OUT/train_traces.jsonl" --output "$OPD_TRACES" --router-data "$ROUTER_DATA" \
         --teacher-model "$OPD_TEACHER_MODEL" --teacher-base-url "$OPD_TEACHER_BASE_URL" \
-        --teacher-api-key "$OPD_TEACHER_API_KEY" --teacher-max-tokens "$OPD_TEACHER_MAX_TOKENS" \
+        --teacher-max-tokens "$OPD_TEACHER_MAX_TOKENS" \
         --user-base-url "$USER_BASE_URL" --max-steps "$COLLECT_MAX_STEPS" \
         --branch-attempts "$OPD_BRANCH_ATTEMPTS" --workers "$OPD_WORKERS" \
         "${SKILL_ARG[@]}" >> "$LOG" 2>&1
@@ -409,7 +432,7 @@ for ((cycle=START_CYCLE; cycle<N_CYCLES; cycle++)); do
     "$TAU2_PY" -m tau2_evolve.build_skillbook \
       --traces "$OUT/train_traces.jsonl" --output "$OUT/skillbook.json" \
       --distiller-model "$DISTILLER_MODEL" --distiller-base-url "$DISTILLER_BASE_URL" \
-      --api-key "$DISTILLER_API_KEY" >> "$LOG" 2>&1
+      >> "$LOG" 2>&1
   fi
 
   # 3. SFT (LoRA continuation from previous cycle's adapter, if any)
@@ -534,21 +557,27 @@ PYEOF
   # from the current checkpoint so labels do not describe a stale model.
   ROUTER_MODEL="$OUT/router.json"
   if [[ "$ENABLE_ROUTER" == "1" ]]; then
-    log "post-train student rollout for router labels"
-    "$TAU2_PY" -m tau2_evolve.collect_traces \
-      --bucket TRAIN --workers "$COLLECT_WORKERS" --max-steps "$COLLECT_MAX_STEPS" --resume \
-      --agent-model "openai/evol-llm-agent" --agent-base-url "$AGENT_BASE_URL" \
-      --user-model "openai/evol-llm-user" --user-base-url "$USER_BASE_URL" \
-      "${AGENT_TOKEN_ARGS[@]}" "${THINKING_ARGS[@]}" --skillbook "$OUT/skillbook.json" \
-      --out "$OUT/system_train.jsonl" >> "$LOG" 2>&1
-    "$TAU2_PY" -m tau2_evolve.collect_opd \
-      --traces "$OUT/system_train.jsonl" --output "$OUT/router_teacher_rescues.jsonl" \
-      --router-data "$OUT/router_data_posttrain.jsonl" \
-      --teacher-model "$OPD_TEACHER_MODEL" --teacher-base-url "$OPD_TEACHER_BASE_URL" \
-      --teacher-api-key "$OPD_TEACHER_API_KEY" --teacher-max-tokens "$OPD_TEACHER_MAX_TOKENS" \
-      --user-base-url "$USER_BASE_URL" --max-steps "$COLLECT_MAX_STEPS" \
-      --branch-attempts "$OPD_BRANCH_ATTEMPTS" --workers "$OPD_WORKERS" \
-      --skillbook "$OUT/skillbook.json" >> "$LOG" 2>&1
+    if [[ "$REUSE_EXISTING_ARTIFACTS" == "1" ]] && \
+       trace_file_complete "$OUT/system_train.jsonl" 97 && \
+       [[ -f "$OUT/router_teacher_rescues.jsonl" && -f "$OUT/router_data_posttrain.jsonl" ]]; then
+      log "reusing complete post-train router artifacts"
+    else
+      log "post-train student rollout for router labels"
+      "$TAU2_PY" -m tau2_evolve.collect_traces \
+        --bucket TRAIN --workers "$COLLECT_WORKERS" --max-steps "$COLLECT_MAX_STEPS" --resume \
+        --agent-model "openai/evol-llm-agent" --agent-base-url "$AGENT_BASE_URL" \
+        --user-model "openai/evol-llm-user" --user-base-url "$USER_BASE_URL" \
+        "${AGENT_TOKEN_ARGS[@]}" "${THINKING_ARGS[@]}" --skillbook "$OUT/skillbook.json" \
+        --out "$OUT/system_train.jsonl" >> "$LOG" 2>&1
+      "$TAU2_PY" -m tau2_evolve.collect_opd \
+        --traces "$OUT/system_train.jsonl" --output "$OUT/router_teacher_rescues.jsonl" \
+        --router-data "$OUT/router_data_posttrain.jsonl" \
+        --teacher-model "$OPD_TEACHER_MODEL" --teacher-base-url "$OPD_TEACHER_BASE_URL" \
+        --teacher-max-tokens "$OPD_TEACHER_MAX_TOKENS" \
+        --user-base-url "$USER_BASE_URL" --max-steps "$COLLECT_MAX_STEPS" \
+        --branch-attempts "$OPD_BRANCH_ATTEMPTS" --workers "$OPD_WORKERS" \
+        --skillbook "$OUT/skillbook.json" >> "$LOG" 2>&1
+    fi
     ROUTER_LABELS="$($MERA_PY - "$OUT/router_data_posttrain.jsonl" <<'PYEOF'
 import json, sys
 labels = {json.loads(line)["label"] for line in open(sys.argv[1]) if line.strip()}
@@ -589,7 +618,6 @@ PYEOF
       --user-model "openai/evol-llm-user" --user-base-url "$USER_BASE_URL" \
       --router-model "$ROUTER_MODEL" --router-teacher-model "$OPD_TEACHER_MODEL" \
       --router-teacher-base-url "$OPD_TEACHER_BASE_URL" \
-      --router-teacher-api-key "$OPD_TEACHER_API_KEY" \
       --router-teacher-max-tokens "$OPD_TEACHER_MAX_TOKENS" \
       "${AGENT_TOKEN_ARGS[@]}" "${THINKING_ARGS[@]}" \
       --skillbook "$OUT/skillbook.json" --out "$OUT/eval_routed.jsonl" >> "$LOG" 2>&1

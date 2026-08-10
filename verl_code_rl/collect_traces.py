@@ -50,6 +50,21 @@ def shard_tasks(tasks: list[dict[str, Any]], modulo: int, remainder: int) -> lis
     ]
 
 
+def shard_tasks_many(
+    tasks: list[dict[str, Any]], modulo: int, remainders: list[int],
+) -> list[dict[str, Any]]:
+    """Select multiple deterministic shards while preserving input order."""
+    if modulo <= 1:
+        return tasks
+    selected = set(remainders)
+    if not selected or any(not 0 <= remainder < modulo for remainder in selected):
+        raise ValueError("task-shard remainders must be non-empty and in [0, modulo)")
+    return [
+        task for task in tasks
+        if int(hashlib.sha256(str(task["task_id"]).encode()).hexdigest(), 16) % modulo in selected
+    ]
+
+
 def _messages(prompt: str, procedure: str = "") -> list[dict[str, str]]:
     content = (
         "Complete the following Python function. Return only the complete code "
@@ -238,6 +253,52 @@ def _router_route(router, prompt: str, threshold: float) -> tuple[str, float | N
         return ("large" if pred else "small"), None
 
 
+def _router_routes(router, prompts: list[str], threshold: float) -> list[tuple[str, float | None]]:
+    """Route a collection with one batched embedding pass."""
+    if router is None:
+        return [("small", None)] * len(prompts)
+    clf, embed_model = router
+    from verl_code_rl.embedding import embed
+
+    features = embed(prompts, embed_model)
+    try:
+        probabilities = clf.predict_proba(features)
+        return [
+            ("large" if float(row[1]) >= threshold else "small", float(row[1]))
+            for row in probabilities
+        ]
+    except Exception:  # noqa: BLE001
+        return [("large" if int(pred) else "small", None) for pred in clf.predict(features)]
+
+
+def large_cache_key(
+    task: dict[str, Any], model: str, temperature: float, max_tokens: int, repair_turns: int,
+) -> str:
+    payload = {
+        "model": model,
+        "task_id": str(task["task_id"]),
+        "prompt": task["prompt"],
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "repair_turns": repair_turns,
+        "large_use_skills": False,
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+
+def load_large_cache(path: Path | None) -> dict[str, dict[str, Any]]:
+    if path is None:
+        return {}
+    cache: dict[str, dict[str, Any]] = {}
+    with path.open(encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            cache[row["cache_key"]] = row["result"]
+    return cache
+
+
 def _apply_policy(
     *,
     route: str,
@@ -314,6 +375,10 @@ def _collect_one(
     skillbook: SkillBook | None,
     router,
     router_threshold: float,
+    route_override: tuple[str, float | None] | None,
+    large_cache: dict[str, dict[str, Any]],
+    large_temperature: float,
+    large_max_tokens: int,
     force_both: bool,
     mock: bool,
     temperature: float,
@@ -329,7 +394,7 @@ def _collect_one(
     prompt = task["prompt"]
     dataset = _dataset_name(task["task_id"], task)
     procedure = skillbook.get_procedure(prompt, dataset) if skillbook else ""
-    route, route_prob = _router_route(router, prompt, router_threshold)
+    route, route_prob = route_override or _router_route(router, prompt, router_threshold)
 
     small_rollouts: list[dict[str, Any]] = []
     for sample in range(max(1, small_samples)):
@@ -348,9 +413,16 @@ def _collect_one(
     # sample set estimates P(small fails) for the router target.
     small = small_rollouts[0]
 
+    cache_key = large_cache_key(
+        task, large_model, large_temperature, large_max_tokens, repair_turns,
+    )
+    cached_large = large_cache.get(cache_key)
     should_run_large = force_both or (not small["success"]) or route == "large"
-    large_skipped = not should_run_large
-    if should_run_large:
+    large_skipped = not should_run_large and cached_large is None
+    large_cache_hit = cached_large is not None
+    if cached_large is not None:
+        large = dict(cached_large)
+    elif should_run_large:
         if mock:
             large = _mock_result(task, "large", cycle)
             large["turns"] = [{"turn": 0, **large}]
@@ -361,8 +433,8 @@ def _collect_one(
                 model=large_model,
                 task=task,
                 procedure=procedure if os.environ.get("LARGE_USE_SKILLS", "1") != "0" else "",
-                temperature=temperature,
-                max_tokens=max_tokens,
+                temperature=large_temperature,
+                max_tokens=large_max_tokens,
                 retries=retries,
                 repair_turns=repair_turns,
             )
@@ -403,6 +475,7 @@ def _collect_one(
         "small_success": bool(small["success"]),
         "large_success": bool(large["success"]),
         "large_skipped": large_skipped,
+        "large_cache_hit": large_cache_hit,
         "oracle_final_model": final_model,
         "oracle_final_success": final_success,
         "final_model": policy["policy_final_model"],
@@ -465,19 +538,28 @@ def main() -> int:
     parser.add_argument("--split", default="train")
     parser.add_argument("--dataset", default="all", choices=["all", "humaneval", "mbpp"])
     parser.add_argument("--limit", type=int, default=-1)
+    parser.add_argument(
+        "--task-offset", type=int, default=0,
+        help="Skip this many tasks after deterministic sharding and before --limit.",
+    )
     parser.add_argument("--cycle", type=int, default=0)
     parser.add_argument("--small-model", required=True)
     parser.add_argument("--large-model", required=True)
     parser.add_argument("--small-base-url", default="http://127.0.0.1:8000/v1")
     parser.add_argument("--large-base-url", default="http://127.0.0.1:8001/v1")
-    parser.add_argument("--api-key", default="EMPTY")
+    parser.add_argument(
+        "--api-key", default=os.environ.get("API_KEY", "EMPTY"),
+        help="OpenAI-compatible API key; defaults to API_KEY from the environment.",
+    )
     parser.add_argument("--router", default="")
     parser.add_argument("--router-threshold", type=float, default=0.5)
     parser.add_argument("--skillbook", default="")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--workers", type=int, default=16)
     parser.add_argument("--temperature", type=float, default=0.2)
+    parser.add_argument("--large-temperature", type=float, default=0.0)
     parser.add_argument("--max-tokens", type=int, default=768)
+    parser.add_argument("--large-max-tokens", type=int, default=768)
     parser.add_argument("--retries", type=int, default=3)
     parser.add_argument("--small-samples", type=int, default=1,
                         help="Independent small rollouts per task for P(small fail) estimation.")
@@ -485,6 +567,10 @@ def main() -> int:
                         help="Extra test-feedback repair attempts per model rollout.")
     parser.add_argument("--task-modulo", type=int, default=1)
     parser.add_argument("--task-remainder", type=int, default=0)
+    parser.add_argument(
+        "--task-remainders", default="",
+        help="Comma-separated shard remainders; overrides --task-remainder.",
+    )
     parser.add_argument("--small-input-cost-per-million", type=float,
                         default=float(os.environ.get("SMALL_INPUT_COST_PER_MILLION", "0")))
     parser.add_argument("--small-output-cost-per-million", type=float,
@@ -495,14 +581,21 @@ def main() -> int:
                         default=float(os.environ.get("LARGE_OUTPUT_COST_PER_MILLION", "0")))
     parser.add_argument("--probe-only", action="store_true",
                         help="Skip the large model when small already passes and router chooses small.")
+    parser.add_argument("--large-cache", type=Path,
+                        help="Deterministic large-model result cache built by build_large_cache.")
+    parser.add_argument("--require-large-cache", action="store_true",
+                        help="Fail before collection if any selected task is absent from --large-cache.")
     args = parser.parse_args()
 
     # Apply a deterministic shard before the optional limit.  Otherwise a small
     # smoke limit can accidentally contain no examples for a router shard.
-    tasks = shard_tasks(
-        load_tasks(args.data, args.split, -1, args.dataset),
-        args.task_modulo, args.task_remainder,
-    )
+    all_tasks = load_tasks(args.data, args.split, -1, args.dataset)
+    if args.task_remainders:
+        remainders = [int(value) for value in args.task_remainders.split(",") if value.strip()]
+        tasks = shard_tasks_many(all_tasks, args.task_modulo, remainders)
+    else:
+        tasks = shard_tasks(all_tasks, args.task_modulo, args.task_remainder)
+    tasks = tasks[max(0, args.task_offset):]
     if args.limit >= 0:
         tasks = tasks[:args.limit]
     args.out.parent.mkdir(parents=True, exist_ok=True)
@@ -514,13 +607,28 @@ def main() -> int:
         skillbook.load(args.skillbook)
 
     router = _load_router(args.router)
+    routes = _router_routes(router, [task["prompt"] for task in tasks], args.router_threshold)
+    large_cache = load_large_cache(args.large_cache)
+    if args.require_large_cache:
+        missing = [
+            task["task_id"] for task in tasks
+            if large_cache_key(
+                task, args.large_model, args.large_temperature, args.large_max_tokens,
+                args.max_repair_turns,
+            ) not in large_cache
+        ]
+        if missing:
+            parser.error(
+                f"large cache is missing {len(missing)} selected tasks; first={missing[0]}"
+            )
     small_client = OpenAI(api_key=args.api_key, base_url=args.small_base_url)
     large_client = OpenAI(api_key=args.api_key, base_url=args.large_base_url)
     force_both = not args.probe_only
 
     if not mock:
         _check_model_registered(small_client, args.small_model, "small", args.small_base_url)
-        _check_model_registered(large_client, args.large_model, "large", args.large_base_url)
+        if not args.require_large_cache:
+            _check_model_registered(large_client, args.large_model, "large", args.large_base_url)
 
     print(
         f"[collect] tasks={len(tasks)} split={args.split} force_both={force_both} "
@@ -542,6 +650,10 @@ def main() -> int:
                 skillbook=skillbook,
                 router=router,
                 router_threshold=args.router_threshold,
+                route_override=route_override,
+                large_cache=large_cache,
+                large_temperature=args.large_temperature,
+                large_max_tokens=args.large_max_tokens,
                 force_both=force_both,
                 mock=mock,
                 temperature=args.temperature,
@@ -554,7 +666,7 @@ def main() -> int:
                 large_input_cost_per_million=args.large_input_cost_per_million,
                 large_output_cost_per_million=args.large_output_cost_per_million,
             )
-            for task in tasks
+            for task, route_override in zip(tasks, routes)
         ]
         with args.out.open("w") as out:
             for fut in as_completed(futures):

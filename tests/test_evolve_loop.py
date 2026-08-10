@@ -1,6 +1,15 @@
 import json
 from pathlib import Path
 
+import numpy as np
+
+from verl_code_rl.collect_traces import (
+    _router_routes,
+    large_cache_key,
+    load_large_cache,
+    shard_tasks,
+    shard_tasks_many,
+)
 from verl_code_rl.prepare_data import convert_rows
 from verl_code_rl.run_ablation import labels_for, policy_metrics, score
 from verl_code_rl.skills import SkillBook
@@ -87,6 +96,28 @@ def test_binomial_router_examples_keep_task_groups(tmp_path: Path):
     assert len(prompts) == 5
 
 
+def test_router_labels_only_large_rescues(tmp_path: Path):
+    traces = [
+        {**_trace("HumanEval/0", "def f():\n", "f", False), "large_success": True},
+        {**_trace("HumanEval/1", "def g():\n", "g", False), "large_success": False},
+    ]
+    path = tmp_path / "traces.jsonl"
+    path.write_text("\n".join(json.dumps(row) for row in traces))
+    _, labels, _, skipped = load_binomial_examples(path)
+    assert skipped == 0
+    assert labels == [1, 0]
+    _, ablation_labels = labels_for(traces)
+    assert ablation_labels == [1, 0]
+
+
+def test_multiple_router_shards_match_union_of_single_shards():
+    tasks = [{"task_id": f"task-{index}"} for index in range(50)]
+    expected = shard_tasks(tasks, 5, 0) + shard_tasks(tasks, 5, 2)
+    actual = shard_tasks_many(tasks, 5, [0, 2])
+    assert {row["task_id"] for row in actual} == {row["task_id"] for row in expected}
+    assert [tasks.index(row) for row in actual] == sorted(tasks.index(row) for row in actual)
+
+
 def test_policy_metrics_include_fallback_cost():
     traces = [
         {"small_success": True, "large_success": True, "large_skipped": False,
@@ -110,3 +141,29 @@ def test_sft_pairs_use_teacher_and_repair_successes():
     ]
     pairs = extract_pairs([teacher, repair])
     assert {pair["source"] for pair in pairs} == {"teacher", "self_repair"}
+
+
+def test_large_cache_key_is_config_sensitive_and_loadable(tmp_path: Path):
+    task = {"task_id": "HumanEval/0", "prompt": "def f():\n"}
+    key = large_cache_key(task, "teacher", 0.0, 768, 0)
+    assert key != large_cache_key(task, "teacher", 0.2, 768, 0)
+    path = tmp_path / "cache.jsonl"
+    path.write_text(json.dumps({"cache_key": key, "result": {"success": True}}) + "\n")
+    assert load_large_cache(path)[key]["success"] is True
+
+
+def test_router_routes_batches_all_prompts(monkeypatch):
+    calls = []
+
+    def fake_embed(prompts, model):
+        calls.append((prompts, model))
+        return np.array([[0.0], [1.0]])
+
+    class Classifier:
+        def predict_proba(self, features):
+            return np.array([[0.8, 0.2], [0.1, 0.9]])
+
+    monkeypatch.setattr("verl_code_rl.embedding.embed", fake_embed)
+    routes = _router_routes((Classifier(), "embed-model"), ["easy", "hard"], 0.5)
+    assert calls == [(["easy", "hard"], "embed-model")]
+    assert routes == [("small", 0.2), ("large", 0.9)]

@@ -17,7 +17,7 @@ import sys
 # They do not execute model code, so reserve the heavy patches for the driver
 # and workers that do.
 _entrypoint = os.path.realpath(sys.argv[0]).replace(os.sep, "/")
-_DEFER_HEAVY_PATCHES = any(
+_DEFER_HEAVY_PATCHES = os.environ.get("QWEN35_ENABLE_VERL_PATCHES") != "1" or any(
     marker in _entrypoint
     for marker in (
         "/ray/dashboard/agent.py",

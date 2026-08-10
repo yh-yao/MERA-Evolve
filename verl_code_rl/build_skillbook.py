@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -20,7 +21,10 @@ def main() -> int:
     parser.add_argument("--distiller-model", default="",
                         help="Optional OpenAI-compatible model for compact Skill distillation.")
     parser.add_argument("--distiller-base-url", default="http://127.0.0.1:8001/v1")
-    parser.add_argument("--api-key", default="EMPTY")
+    parser.add_argument(
+        "--api-key", default=os.environ.get("DISTILLER_API_KEY", "EMPTY"),
+        help="Distiller API key; defaults to DISTILLER_API_KEY from the environment.",
+    )
     parser.add_argument("--distiller-max-examples", type=int, default=40)
     args = parser.parse_args()
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -89,7 +90,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data", type=Path, default=Path("data/raw/he_mbpp.jsonl"))
     parser.add_argument("--base-url", default="http://127.0.0.1:8000/v1")
-    parser.add_argument("--api-key", default="EMPTY")
+    parser.add_argument(
+        "--api-key", default=os.environ.get("API_KEY", "EMPTY"),
+        help="OpenAI-compatible API key; defaults to API_KEY from the environment.",
+    )
     parser.add_argument("--model", required=True)
     parser.add_argument("--split", default="eval")
     parser.add_argument("--dataset", default="all", choices=["all", "humaneval", "mbpp"])

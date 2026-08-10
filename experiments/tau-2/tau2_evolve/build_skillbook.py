@@ -25,7 +25,7 @@ def main() -> int:
     ap.add_argument("--output", type=Path, required=True)
     ap.add_argument("--distiller-model", default=None)
     ap.add_argument("--distiller-base-url", default="https://api.commonstack.ai/v1")
-    ap.add_argument("--api-key", default=None)
+    ap.add_argument("--api-key", default=os.environ.get("DISTILLER_API_KEY"))
     args = ap.parse_args()
 
     book = SkillBook()

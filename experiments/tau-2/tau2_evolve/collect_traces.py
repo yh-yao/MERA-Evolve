@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -88,7 +89,10 @@ def main() -> int:
     ap.add_argument("--router-model", type=Path)
     ap.add_argument("--router-teacher-model")
     ap.add_argument("--router-teacher-base-url")
-    ap.add_argument("--router-teacher-api-key", default="EMPTY")
+    ap.add_argument(
+        "--router-teacher-api-key",
+        default=os.environ.get("OPD_TEACHER_API_KEY", "EMPTY"),
+    )
     ap.add_argument("--router-teacher-max-tokens", type=int, default=1024)
     ap.add_argument("--out", type=Path, required=True)
     args = ap.parse_args()

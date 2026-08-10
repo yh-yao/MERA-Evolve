@@ -33,6 +33,7 @@ SFT_DATASET_PATH="${SFT_DATASET_PATH:-}"
 SFT_DATASET_NAME="${SFT_DATASET_NAME:-Qwen35MultiTurnSFTDataset}"
 SFT_PROJECT_NAME="${SFT_PROJECT_NAME:-verl_code_rl_sft}"
 SFT_EXPERIMENT_NAME="${SFT_EXPERIMENT_NAME:-sft}"
+TRAINING_SEED="${TRAINING_SEED:-1}"
 
 # LoRA (default; same algorithm as train_grpo.sh). Set LORA_RANK=0 for
 # full-parameter SFT -- note the adapter-extraction step below is skipped in
@@ -77,9 +78,21 @@ if [[ ! -f "$SFT_DATA" ]]; then
 fi
 
 CKPT_DIR="$SFT_OUTPUT_DIR/verl_checkpoints"
+TRAIN_PYTHONPATH="${PYTHONPATH:-}"
+QWEN35_ENABLE_VERL_PATCHES="${QWEN35_ENABLE_VERL_PATCHES:-0}"
+if [[ "$MODEL_PATH" == *"Qwen3.5"* && -n "${QWEN35_TRAIN_TRITON_OVERLAY:-}" ]]; then
+  TRAIN_PYTHONPATH="$QWEN35_TRAIN_TRITON_OVERLAY:$TRAIN_PYTHONPATH"
+  QWEN35_ENABLE_VERL_PATCHES=1
+fi
+if [[ "$MODEL_PATH" == *"Qwen3.5"* ]]; then
+  # TileLang/TVM segfaults in the Qwen3.5 GDN backward on this CUDA 12.9
+  # stack. FLA's Triton implementation is stable for both forward and backward.
+  export FLA_TILELANG="${FLA_TILELANG:-0}"
+fi
 
 set -x
-"$PYTHON" -m torch.distributed.run --standalone --nnodes=1 --nproc_per_node="$N_GPUS" \
+PYTHONPATH="$TRAIN_PYTHONPATH" QWEN35_ENABLE_VERL_PATCHES="$QWEN35_ENABLE_VERL_PATCHES" \
+  "$PYTHON" -m torch.distributed.run --standalone --nnodes=1 --nproc_per_node="$N_GPUS" \
   -m verl.trainer.sft_trainer \
   data.train_files="$SFT_DATA" \
   data.train_batch_size="$SFT_BATCH_SIZE" \
@@ -90,6 +103,7 @@ set -x
   model.trust_remote_code=True \
   optim.lr="$SFT_LR" \
   trainer.total_epochs="$SFT_TOTAL_EPOCHS" \
+  trainer.seed="$TRAINING_SEED" \
   trainer.project_name="$SFT_PROJECT_NAME" \
   trainer.experiment_name="$SFT_EXPERIMENT_NAME" \
   trainer.default_local_dir="$CKPT_DIR" \

@@ -139,7 +139,7 @@ PORT=8001 scripts/stop_vllm.sh
 ## TAU-2 setup
 
 TAU-2 needs two environments because the benchmark simulator and the modern
-Qwen3.5 VERL/vLLM stack have conflicting dependency sets. By default,
+Qwen3.5 VERL/SGLang stack have conflicting dependency sets. By default,
 MERA-Evolve discovers a sibling checkout named `router-skills-evolve`:
 
 ```text
@@ -191,9 +191,23 @@ for a fresh resolver. The important constraints are:
 - build FLA extensions with the CUDA 12.8 toolkit;
 - put Triton 3.3 only in `.deps/qwen35-triton33`, not in vLLM's global path.
 
-The expected default locations are `.venv_qwen35`, `.deps/cuda-12.8`, and
+The expected training locations are `.venv_qwen35`, `.deps/cuda-12.8`, and
 `.deps/qwen35-triton33`. Other layouts are supported through `TRAIN_VENV`,
-`QWEN35_CUDA_HOME`, and `QWEN35_TRAIN_TRITON_OVERLAY`.
+`QWEN35_CUDA_HOME`, and `QWEN35_TRAIN_TRITON_OVERLAY`. For Qwen3.5 code-task
+collection and evaluation, use a separate local-NVMe serving environment:
+
+```bash
+python3.12 -m venv /local_nvme/mera-sglang
+/local_nvme/mera-sglang/bin/pip install -r requirements-qwen35-serving.txt
+export QWEN35_SERVE_VENV=/local_nvme/mera-sglang
+```
+
+The split is intentional: VERL 0.8 uses vLLM 0.18.1 internally, while the
+external endpoints use SGLang 0.5.10. The MBPP launcher bounds each external
+server lifetime with restartable 64-task chunks and merges trained LoRA
+adapters into standalone checkpoints before serving. This avoids the
+long-lived Qwen3.5 GDN zero-throughput state and SGLang's incomplete direct
+Qwen3.5 LoRA support on the current CUDA-12.9 driver.
 
 Verify both environments before a full run:
 
@@ -202,6 +216,7 @@ TAU2_WORKSPACE=${TAU2_WORKSPACE:-../router-skills-evolve}
 "$TAU2_WORKSPACE/.venv_tau2/bin/python3" -c 'import tau2; print("tau2 ok")'
 .venv_qwen35/bin/python -c 'import torch, verl, vllm; print(torch.version.cuda)'
 .venv_qwen35/bin/vllm --version
+"$QWEN35_SERVE_VENV/bin/python" -c 'import torch, sglang; print(torch.version.cuda, sglang.__version__)'
 ```
 
 ## Running TAU-2

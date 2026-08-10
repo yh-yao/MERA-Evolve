@@ -38,6 +38,7 @@ Write-ups of past runs of these scripts live in `docs/experiments/`.
 | `03_grpo_only.sh` | GRPO alone | GRPO (LoRA) | no |
 | `04_4cycle_sft.sh` | Skills+SFT compounding over cycles | SFT (LoRA), 4 cycles | yes |
 | `05_4cycle_sft_grpo.sh` | Skills+SFT+GRPO compounding over cycles | SFT+GRPO (LoRA), 4 cycles | yes |
+| `06_qwen35_2b_mbpp_4cycle.sh` | Qwen3.5-2B MBPP closed loop | SFT+separated VERL GRPO, 4 cycles | yes |
 
 `grpo_qwen25_1p5b.env` / `sft_qwen25_1p5b.env` in that same directory pin the
 standalone-training entry points' (`scripts/train_grpo.sh` /
@@ -64,6 +65,12 @@ TRAIN_GPU=2 scripts/run_experiment.sh humaneval_mbpp grpo
 # cycle's training step (SMALL_RELOAD_GPU) -- see each script's header.
 SFT_GPU=2 SMALL_RELOAD_GPU=0 scripts/run_experiment.sh humaneval_mbpp 4cycle-sft
 GRPO_GPU=2 SMALL_RELOAD_GPU=0 scripts/run_experiment.sh humaneval_mbpp 4cycle-sft-grpo
+
+# Qwen3.5 MBPP: isolate external SGLang from the VERL training environment.
+python3.12 -m venv /local_nvme/mera-sglang
+/local_nvme/mera-sglang/bin/pip install -r requirements-qwen35-serving.txt
+QWEN35_SERVE_VENV=/local_nvme/mera-sglang \
+  scripts/run_experiment.sh humaneval_mbpp qwen35-mbpp
 ```
 
 Every env var each script reads has a documented default in its header;
@@ -77,14 +84,17 @@ bash experiments/humaneval_mbpp/03_grpo_only.sh` for a fast smoke run.
   stationary after 64 steps (KL-divergence from the reference policy stayed
   under 0.2 the whole run, vs 0.28-0.36 for the higher LRs) -- `5e-5` was the
   strongest and still stable of the three tested.
-- **`ENFORCE_EAGER=True` everywhere**: this node's vLLM build reproduces a
+- **`ENFORCE_EAGER=True` for the Qwen2.5 and VERL 0.18 paths**: this node's
+  older vLLM build reproduces a
   CUDA-graph-only crash (`illegal instruction` / `illegal memory access` /
   `unspecified launch failure`, all the same underlying instability) and,
   short of crashing outright, gives numerically *unreliable* results under
   CUDA graphs -- confirmed by reproducing a large internal-vs-external eval
   gap that closed to ~1-2pts once both sides ran in eager mode. Eager mode is
-  the only setting confirmed reproducible on this hardware; trust eager-mode
-  numbers over anything computed with CUDA graphs enabled.
+  the only setting confirmed reproducible for those paths. Qwen3.5 external
+  serving is the exception: recipe 06 uses SGLang 0.5.10 and bounded,
+  restartable 64-task collection chunks because long-lived Qwen3.5 GDN
+  serving can otherwise enter a zero-throughput state.
 - **Bigger GRPO micro-batch (`PPO_MICRO_BATCH_SIZE_PER_GPU=32`,
   `LOG_PROB_MICRO_BATCH_SIZE_PER_GPU=64`, `PPO_MINI_BATCH_SIZE=32`)**: the
   smaller defaults (8/16/16) left GPU memory at ~20% utilization and MFU

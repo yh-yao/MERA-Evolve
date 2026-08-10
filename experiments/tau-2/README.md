@@ -11,6 +11,7 @@ scripts/run_experiment.sh tau2 sft
 scripts/run_experiment.sh tau2 grpo
 scripts/run_experiment.sh tau2 sft-grpo
 scripts/run_experiment.sh tau2 4cycle
+scripts/run_experiment.sh tau2 4b-baseline
 ```
 
 The numbered scripts are the public experiment entry points:
@@ -22,6 +23,8 @@ The numbered scripts are the public experiment entry points:
 5. `05_fallback_4b_smoke.sh`: one-task Qwen3.5-4B runtime smoke test.
 6. `06_4cycle.sh`: recommended Qwen3.5 OPD + SkillBook + SFT + GRPO + router
    four-cycle reproduction.
+7. `07_4b_baseline_eval.sh`: endpoint-only Qwen3.5-4B evaluation on the fixed
+   35-task split, without skills, adapters, routing, or fallback.
 
 Everything else is an implementation detail:
 
@@ -50,6 +53,9 @@ AGENT_GPU=0 AGENT_PORT=8260 \
 USER_GPU=1 USER_PORT=8261 \
 TRAIN_GPU=2 ROLLOUT_GPU=3 \
 scripts/run_experiment.sh tau2 4cycle
+
+GPU=2 USER_GPU=3 PORT=8280 USER_PORT=8281 \
+scripts/run_experiment.sh tau2 4b-baseline
 ```
 
 For Qwen3.5 GRPO-only, first create a strict, domain-interleaved parquet. Do

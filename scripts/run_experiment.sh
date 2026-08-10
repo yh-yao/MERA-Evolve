@@ -12,12 +12,14 @@ declare -A RECIPES=(
   ["humaneval_mbpp:grpo"]="experiments/humaneval_mbpp/03_grpo_only.sh"
   ["humaneval_mbpp:4cycle-sft"]="experiments/humaneval_mbpp/04_4cycle_sft.sh"
   ["humaneval_mbpp:4cycle-sft-grpo"]="experiments/humaneval_mbpp/05_4cycle_sft_grpo.sh"
+  ["humaneval_mbpp:qwen35-mbpp"]="experiments/humaneval_mbpp/06_qwen35_2b_mbpp_4cycle.sh"
   ["tau2:skills"]="experiments/tau-2/01_skills_only.sh"
   ["tau2:sft"]="experiments/tau-2/02_sft_only.sh"
   ["tau2:grpo"]="experiments/tau-2/03_grpo_only.sh"
   ["tau2:sft-grpo"]="experiments/tau-2/04_sft_grpo.sh"
   ["tau2:fallback-smoke"]="experiments/tau-2/05_fallback_4b_smoke.sh"
   ["tau2:4cycle"]="experiments/tau-2/06_4cycle.sh"
+  ["tau2:4b-baseline"]="experiments/tau-2/07_4b_baseline_eval.sh"
 )
 
 usage() {
