@@ -11,8 +11,7 @@ cost-calibrated router with verifier-backed fallback.
 | HumanEval+MBPP (582 held-out, 3 seeds) | Qwen2.5-Coder-1.5B: **28.7% → 49.7%** direct pass; deployed **88.3%** at **60.8%** always-Luna cost |
 | TAU-2 (35 held-out) | Qwen3.5-2B GRPO: **14/35 → 18/35**, matching unadapted 4B |
 
-Paper sources live under [`routerevolving-3/`](routerevolving-3/). Detailed
-machine setup, resume, and monitoring notes are in [`CLAUDE.md`](CLAUDE.md).
+Detailed machine setup, resume, and monitoring notes are in [`CLAUDE.md`](CLAUDE.md).
 Recipe index: [`experiments/README.md`](experiments/README.md).
 
 ## Quick start
