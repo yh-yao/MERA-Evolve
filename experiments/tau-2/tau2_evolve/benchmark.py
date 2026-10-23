@@ -118,16 +118,28 @@ def load_partition() -> dict[str, list[dict[str, str]]]:
     return json.loads(PARTITION_PATH.read_text())
 
 
+def partition_version() -> int:
+    """1 = tau2_stage2's partition.json; 2 = make_partition_v2 output.
+
+    v2 lists real, loadable telecom task IDs, so the get_tasks_small()
+    substitution below applies to v1 only.
+    """
+    return int(load_partition().get("version", 1))
+
+
 def task_ids_for(bucket: str, domain: str | None = None) -> list[tuple[str, str]]:
     """Return [(domain, task_id), ...] for a partition bucket (TRAIN/EVAL/DIAG/VAL).
 
-    telecom's partition.json task_ids ("mob_E_002" etc.) don't resolve to any
-    loadable tau2 task (their mapping script isn't shipped -- see
+    v1 only: telecom's partition.json task_ids ("mob_E_002" etc.) don't resolve
+    to any loadable tau2 task (their mapping script isn't shipped -- see
     _load_all_tasks) -- substituted here with a fresh split of tau2's own
     get_tasks_small() (20 real tasks): first 8 for EVAL, remaining 12 for
     TRAIN. Not comparable to tau2_stage2's historical telecom numbers, but a
     real, loadable telecom set for our own skills_only/sft_only baselines.
     """
+    if partition_version() >= 2:
+        rows = load_partition()[bucket]
+        return [(r["domain"], r["task_id"]) for r in rows if domain is None or r["domain"] == domain]
     if bucket in ("TRAIN", "EVAL") and (domain is None or domain == "telecom"):
         real_telecom_ids = telecom_small_task_ids()
         telecom_eval_ids = real_telecom_ids[:8]
@@ -194,11 +206,14 @@ def _load_all_tasks(domain: str) -> list[dict[str, Any]]:
     script isn't shipped in the bundle, so telecom uses tau2's own
     get_tasks_small() (20 real, natively-IDed tasks) as a fresh substitute
     instead of trying to reverse-engineer the lost mapping.
+
+    Every telecom split is a subset of the same task file, so loading the
+    unsplit set resolves both the v1 small-set IDs and v2's base-split IDs.
     """
     if domain == "telecom":
-        from tau2.domains.telecom.environment import get_tasks_small
+        from tau2.domains.telecom.environment import get_tasks
 
-        return [t.model_dump(mode="json") for t in get_tasks_small()]
+        return [t.model_dump(mode="json") for t in get_tasks(None)]
     return _adapter().load_tasks(domain)
 
 
@@ -209,7 +224,9 @@ def load_task(domain: str, task_id: str) -> dict[str, Any]:
 
 
 def telecom_small_task_ids() -> list[str]:
-    return [t["id"] for t in _load_all_tasks("telecom")]
+    from tau2.domains.telecom.environment import get_tasks_small
+
+    return [t.id for t in get_tasks_small()]
 
 
 def make_llm_spec(
@@ -220,6 +237,7 @@ def make_llm_spec(
     temperature: float = 0.0,
     enable_thinking: bool | None = None,
     max_tokens: int | None = None,
+    seed: int | None = None,
 ):
     from core.schemas.artifacts import LLMSpec
 
@@ -231,6 +249,10 @@ def make_llm_spec(
         "api_key": api_key,
         "temperature": temperature,
     }
+    if seed is not None:
+        # Per-request sampling seed: makes a temperature>0 trial reproducible
+        # while letting different trials of one task diverge (pass^k).
+        args["seed"] = seed
     if max_tokens is not None:
         args["max_tokens"] = max_tokens
     if enable_thinking is not None:

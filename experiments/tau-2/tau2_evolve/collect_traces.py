@@ -72,6 +72,20 @@ def main() -> int:
         help="Independent fallback rollouts; stop early on an action-complete pass.",
     )
     ap.add_argument("--seed", type=int, default=300)
+    ap.add_argument(
+        "--trials", type=int, default=1,
+        help="Independent trials per task for pass^k. Trial t uses seed --seed + t for the "
+             "orchestrator and as the per-request sampling seed of both endpoints.",
+    )
+    ap.add_argument(
+        "--agent-temperature", type=float, default=0.0,
+        help="Agent sampling temperature (tau2 default 0.0).",
+    )
+    ap.add_argument(
+        "--user-temperature", type=float, default=0.0,
+        help="User-simulator temperature. With --trials > 1 this must be > 0, otherwise the "
+             "trials of one task are near-identical and pass^k degenerates to pass^1.",
+    )
     ap.add_argument("--max-steps", type=int, default=60)
     ap.add_argument("--max-errors", type=int, default=10)
     ap.add_argument("--workers", type=int, default=4)
@@ -98,6 +112,12 @@ def main() -> int:
     args = ap.parse_args()
     if args.fallback_attempts < 1:
         ap.error("--fallback-attempts must be at least 1")
+    if args.trials < 1:
+        ap.error("--trials must be at least 1")
+    if args.trials > 1 and args.user_temperature <= 0.0 and args.agent_temperature <= 0.0:
+        ap.error("--trials > 1 needs --user-temperature or --agent-temperature > 0")
+    if args.trials > 1 and args.probe_only:
+        ap.error("--trials is an evaluation option; it cannot be combined with --probe-only")
 
     # Tau2 logs every message and tool payload at DEBUG and reports unknown
     # local-model pricing at ERROR. Under a large thread pool, serializing
@@ -126,27 +146,49 @@ def main() -> int:
                 for row in existing_rows:
                     cleaned.write(json.dumps(row, ensure_ascii=False) + "\n")
             print(f"[collect] retrying {len(failed_rows)} errored rows", file=sys.stderr)
-        completed = {(row["domain"], str(row["task_id"])) for row in existing_rows}
-        tasks = [(domain, task_id) for domain, task_id in tasks if (domain, str(task_id)) not in completed]
+        completed = {
+            (row["domain"], str(row["task_id"]), int(row.get("trial", 0))) for row in existing_rows
+        }
+    else:
+        completed = set()
+    jobs = [
+        (domain, task_id, trial)
+        for trial in range(args.trials)
+        for domain, task_id in tasks
+        if (domain, str(task_id), trial) not in completed
+    ]
 
     skillbook: dict[str, str] = {}
     if args.skillbook:
         skillbook = json.loads(args.skillbook.read_text())
 
-    agent_spec = benchmark.make_llm_spec(
-        args.agent_model,
-        args.agent_base_url,
-        args.agent_api_key,
-        enable_thinking=args.agent_thinking,
-        max_tokens=args.agent_max_tokens,
-    )
-    user_spec = benchmark.make_llm_spec(
-        args.user_model,
-        args.user_base_url,
-        args.user_api_key,
-        enable_thinking=args.user_thinking,
-        max_tokens=args.user_max_tokens,
-    )
+    def _trial_specs(trial: int):
+        # Seeds are only attached for multi-trial runs so single-run commands
+        # keep sending exactly the request they always sent.
+        seed = args.seed + trial if args.trials > 1 else None
+        agent = benchmark.make_llm_spec(
+            args.agent_model,
+            args.agent_base_url,
+            args.agent_api_key,
+            temperature=args.agent_temperature,
+            enable_thinking=args.agent_thinking,
+            max_tokens=args.agent_max_tokens,
+            seed=seed,
+        )
+        user = benchmark.make_llm_spec(
+            args.user_model,
+            args.user_base_url,
+            args.user_api_key,
+            temperature=args.user_temperature,
+            enable_thinking=args.user_thinking,
+            max_tokens=args.user_max_tokens,
+            seed=seed,
+        )
+        return agent, user
+
+    agent_spec, user_spec = _trial_specs(0)
+    # The NL judge keeps tau2's own temperature (prime_nl_judge_routing
+    # overrides it); only its endpoint comes from the user spec.
     benchmark.prime_nl_judge_routing(user_spec)  # single-threaded, before the pool below
 
     fallback_agent_spec = fallback_user_spec = None
@@ -177,22 +219,28 @@ def main() -> int:
         )
 
     print(
-        f"[collect] bucket={args.bucket} n_tasks={total_tasks} remaining={len(tasks)} "
+        f"[collect] bucket={args.bucket} n_tasks={total_tasks} trials={args.trials} "
+        f"remaining={len(jobs)} "
         f"skillbook={'yes' if skillbook else 'no'} probe_only={args.probe_only}",
         file=sys.stderr,
     )
     args.out.parent.mkdir(parents=True, exist_ok=True)
 
-    def _collect_one(domain: str, task_id: str) -> dict:
+    def _collect_one(domain: str, task_id: str, trial: int) -> dict:
         skill_text = skillbook.get(domain, "")
+        trial_agent_spec, trial_user_spec = _trial_specs(trial)
         main_row = benchmark.run_task(
-            domain=domain, task_id=task_id, agent_spec=agent_spec, user_spec=user_spec,
-            seed=args.seed, max_steps=args.max_steps, max_errors=args.max_errors,
+            domain=domain, task_id=task_id, agent_spec=trial_agent_spec, user_spec=trial_user_spec,
+            seed=args.seed + trial, max_steps=args.max_steps, max_errors=args.max_errors,
             skill_text=skill_text,
             router_model_path=args.router_model,
             router_teacher_spec=router_teacher_spec,
         )
         main_row["fallback_used"] = False
+        main_row["trial"] = trial
+        main_row["trial_seed"] = args.seed + trial
+        main_row["agent_temperature"] = args.agent_temperature
+        main_row["user_temperature"] = args.user_temperature
         if (main_row["passed"] and benchmark.trace_action_complete(main_row)) or not args.probe_only:
             return main_row
 
@@ -233,14 +281,17 @@ def main() -> int:
     )
     with args.out.open("a" if args.resume else "w") as out:
         with ThreadPoolExecutor(max_workers=args.workers) as pool:
-            futures = {pool.submit(_collect_one, domain, task_id): (domain, task_id) for domain, task_id in tasks}
+            futures = {
+                pool.submit(_collect_one, domain, task_id, trial): (domain, task_id, trial)
+                for domain, task_id, trial in jobs
+            }
             for fut in as_completed(futures):
-                domain, task_id = futures[fut]
+                domain, task_id, trial = futures[fut]
                 try:
                     row = fut.result()
                 except Exception as e:  # noqa: BLE001
-                    print(f"[collect] FAILED {domain}/{task_id}: {e}", file=sys.stderr)
-                    row = {"domain": domain, "task_id": task_id, "passed": False, "reward": 0.0, "error": str(e), "fallback_used": False}
+                    print(f"[collect] FAILED {domain}/{task_id} trial={trial}: {e}", file=sys.stderr)
+                    row = {"domain": domain, "task_id": task_id, "trial": trial, "passed": False, "reward": 0.0, "error": str(e), "fallback_used": False}
                 passed += int(row.get("passed", False))
                 fallback_rescued += int(
                     row.get("fallback_used", False)
@@ -253,9 +304,13 @@ def main() -> int:
                     f" [fallback {row.get('fallback_attempt')}/{row.get('fallback_attempts_run')}]"
                     if row.get("fallback_used") else ""
                 )
-                print(f"[collect] {domain}/{task_id}{tag} passed={row.get('passed')} reward={row.get('reward', 0.0):.2f}", file=sys.stderr)
+                print(f"[collect] {domain}/{task_id} t{trial}{tag} passed={row.get('passed')} reward={row.get('reward', 0.0):.2f}", file=sys.stderr)
 
-    print(f"[collect] done passed={passed}/{total_tasks} (fallback_rescued={fallback_rescued})", file=sys.stderr)
+    print(
+        f"[collect] done passed={passed}/{total_tasks * args.trials} "
+        f"(fallback_rescued={fallback_rescued})",
+        file=sys.stderr,
+    )
     return 0
 
 

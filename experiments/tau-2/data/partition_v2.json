@@ -1,0 +1,1247 @@
+{
+ "version": 2,
+ "source_v1": "tau2_stage2/data_processed/stage2_v1/partition.json",
+ "seed": 20261022,
+ "TRAIN": [
+  {
+   "bucket": "TRAIN",
+   "domain": "airline",
+   "task_id": "1"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "airline",
+   "task_id": "11"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "airline",
+   "task_id": "13"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "airline",
+   "task_id": "14"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "airline",
+   "task_id": "15"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "airline",
+   "task_id": "16"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "airline",
+   "task_id": "19"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "airline",
+   "task_id": "2"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "airline",
+   "task_id": "20"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "airline",
+   "task_id": "21"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "airline",
+   "task_id": "22"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "airline",
+   "task_id": "24"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "airline",
+   "task_id": "26"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "airline",
+   "task_id": "28"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "airline",
+   "task_id": "3"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "airline",
+   "task_id": "31"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "airline",
+   "task_id": "32"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "airline",
+   "task_id": "33"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "airline",
+   "task_id": "34"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "airline",
+   "task_id": "35"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "airline",
+   "task_id": "36"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "airline",
+   "task_id": "37"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "airline",
+   "task_id": "38"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "airline",
+   "task_id": "4"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "airline",
+   "task_id": "40"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "airline",
+   "task_id": "41"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "airline",
+   "task_id": "42"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "airline",
+   "task_id": "43"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "airline",
+   "task_id": "45"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "airline",
+   "task_id": "46"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "airline",
+   "task_id": "47"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "airline",
+   "task_id": "49"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "airline",
+   "task_id": "5"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "airline",
+   "task_id": "9"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "retail",
+   "task_id": "0"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "retail",
+   "task_id": "1"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "retail",
+   "task_id": "10"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "retail",
+   "task_id": "107"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "retail",
+   "task_id": "13"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "retail",
+   "task_id": "15"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "retail",
+   "task_id": "16"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "retail",
+   "task_id": "19"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "retail",
+   "task_id": "21"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "retail",
+   "task_id": "30"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "retail",
+   "task_id": "32"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "retail",
+   "task_id": "33"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "retail",
+   "task_id": "34"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "retail",
+   "task_id": "35"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "retail",
+   "task_id": "36"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "retail",
+   "task_id": "37"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "retail",
+   "task_id": "39"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "retail",
+   "task_id": "40"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "retail",
+   "task_id": "41"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "retail",
+   "task_id": "42"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "retail",
+   "task_id": "43"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "retail",
+   "task_id": "44"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "retail",
+   "task_id": "45"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "retail",
+   "task_id": "46"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "retail",
+   "task_id": "47"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "retail",
+   "task_id": "48"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "retail",
+   "task_id": "49"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "retail",
+   "task_id": "50"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "retail",
+   "task_id": "51"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "retail",
+   "task_id": "52"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "retail",
+   "task_id": "53"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "retail",
+   "task_id": "56"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "retail",
+   "task_id": "57"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "retail",
+   "task_id": "58"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "retail",
+   "task_id": "59"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "retail",
+   "task_id": "64"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "retail",
+   "task_id": "65"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "retail",
+   "task_id": "69"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "retail",
+   "task_id": "72"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "retail",
+   "task_id": "73"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "retail",
+   "task_id": "75"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "retail",
+   "task_id": "77"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "retail",
+   "task_id": "79"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "retail",
+   "task_id": "80"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "retail",
+   "task_id": "81"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "retail",
+   "task_id": "84"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "retail",
+   "task_id": "88"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "retail",
+   "task_id": "93"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "retail",
+   "task_id": "94"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "retail",
+   "task_id": "96"
+  },
+  {
+   "bucket": "TRAIN",
+   "domain": "retail",
+   "task_id": "97"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mms_issue]airplane_mode_on|bad_network_preference|bad_wifi_calling|break_apn_mms_setting|break_app_both_permissions|data_mode_off|data_usage_exceeded|unseat_sim_card|user_abroad_roaming_disabled_off[PERSONA:Hard]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mms_issue]airplane_mode_on|bad_network_preference|bad_wifi_calling|break_apn_mms_setting|break_app_sms_permission|data_mode_off|data_usage_exceeded|unseat_sim_card|user_abroad_roaming_enabled_off[PERSONA:None]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mms_issue]airplane_mode_on|bad_network_preference|bad_wifi_calling|break_apn_mms_setting|break_app_storage_permission|data_mode_off|data_usage_exceeded|unseat_sim_card[PERSONA:Easy]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mms_issue]airplane_mode_on|bad_network_preference|bad_wifi_calling|break_apn_mms_setting|break_app_storage_permission|data_mode_off|data_usage_exceeded|unseat_sim_card|user_abroad_roaming_disabled_off[PERSONA:Easy]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mms_issue]airplane_mode_on|bad_network_preference|bad_wifi_calling|break_apn_mms_setting|break_app_storage_permission|data_usage_exceeded|unseat_sim_card|user_abroad_roaming_disabled_off[PERSONA:Easy]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mms_issue]airplane_mode_on|bad_network_preference|bad_wifi_calling|break_app_sms_permission|data_mode_off|data_usage_exceeded|unseat_sim_card|user_abroad_roaming_disabled_off[PERSONA:None]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mms_issue]airplane_mode_on|bad_network_preference|bad_wifi_calling|break_app_storage_permission|data_mode_off|data_usage_exceeded|unseat_sim_card|user_abroad_roaming_enabled_off[PERSONA:Hard]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mms_issue]airplane_mode_on|bad_network_preference|bad_wifi_calling|data_usage_exceeded|unseat_sim_card|user_abroad_roaming_disabled_on[PERSONA:Easy]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mms_issue]airplane_mode_on|bad_network_preference|break_apn_mms_setting|break_app_both_permissions|data_mode_off|data_usage_exceeded|user_abroad_roaming_enabled_off[PERSONA:None]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mms_issue]airplane_mode_on|bad_network_preference|break_apn_mms_setting|data_mode_off|unseat_sim_card|user_abroad_roaming_disabled_off[PERSONA:Easy]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mms_issue]airplane_mode_on|bad_network_preference|break_apn_mms_setting|data_usage_exceeded[PERSONA:Hard]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mms_issue]bad_network_preference|bad_wifi_calling|break_app_both_permissions|data_usage_exceeded|unseat_sim_card|user_abroad_roaming_disabled_off[PERSONA:None]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mms_issue]bad_network_preference|bad_wifi_calling|break_app_sms_permission|data_mode_off|unseat_sim_card|user_abroad_roaming_enabled_off[PERSONA:Hard]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mms_issue]bad_network_preference|break_app_sms_permission|data_mode_off|data_usage_exceeded|user_abroad_roaming_enabled_off[PERSONA:None]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mms_issue]bad_wifi_calling|break_apn_mms_setting|break_app_sms_permission|data_usage_exceeded[PERSONA:Hard]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mms_issue]bad_wifi_calling|break_apn_mms_setting|data_mode_off|data_usage_exceeded|unseat_sim_card[PERSONA:None]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mms_issue]bad_wifi_calling|data_mode_off|data_usage_exceeded[PERSONA:Easy]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mms_issue]break_app_both_permissions|data_usage_exceeded[PERSONA:Hard]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mms_issue]break_app_both_permissions|unseat_sim_card|user_abroad_roaming_disabled_on[PERSONA:Hard]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mms_issue]break_app_sms_permission|data_usage_exceeded|user_abroad_roaming_disabled_on[PERSONA:None]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mms_issue]break_app_storage_permission|unseat_sim_card|user_abroad_roaming_disabled_on[PERSONA:Easy]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mobile_data_issue]airplane_mode_on|bad_network_preference|bad_vpn|data_mode_off|data_saver_mode_on|data_usage_exceeded|user_abroad_roaming_disabled_on[PERSONA:None]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mobile_data_issue]airplane_mode_on|bad_network_preference|bad_vpn|data_mode_off|data_saver_mode_on|user_abroad_roaming_disabled_off[PERSONA:Hard]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mobile_data_issue]airplane_mode_on|bad_network_preference|bad_vpn|data_mode_off|data_usage_exceeded|user_abroad_roaming_enabled_off[PERSONA:Easy]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mobile_data_issue]airplane_mode_on|bad_network_preference|bad_vpn|data_saver_mode_on|user_abroad_roaming_disabled_on[PERSONA:Easy]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mobile_data_issue]airplane_mode_on|bad_network_preference|data_mode_off|data_saver_mode_on|data_usage_exceeded|user_abroad_roaming_disabled_on[PERSONA:None]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mobile_data_issue]airplane_mode_on|bad_network_preference|data_mode_off|data_usage_exceeded|user_abroad_roaming_disabled_on[PERSONA:None]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mobile_data_issue]airplane_mode_on|bad_network_preference|data_mode_off|user_abroad_roaming_disabled_on[PERSONA:Hard]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mobile_data_issue]airplane_mode_on|bad_network_preference|data_saver_mode_on|data_usage_exceeded|user_abroad_roaming_disabled_off[PERSONA:None]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mobile_data_issue]airplane_mode_on|bad_network_preference|data_usage_exceeded|user_abroad_roaming_disabled_off[PERSONA:Easy]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mobile_data_issue]airplane_mode_on|bad_network_preference|user_abroad_roaming_enabled_off[PERSONA:Easy]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mobile_data_issue]airplane_mode_on|data_mode_off[PERSONA:None]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mobile_data_issue]airplane_mode_on|user_abroad_roaming_enabled_off[PERSONA:None]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mobile_data_issue]bad_network_preference|bad_vpn|data_mode_off|data_saver_mode_on[PERSONA:None]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mobile_data_issue]bad_network_preference|bad_vpn|data_usage_exceeded|user_abroad_roaming_disabled_off[PERSONA:Easy]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mobile_data_issue]bad_network_preference|bad_vpn|user_abroad_roaming_enabled_off[PERSONA:Easy]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mobile_data_issue]bad_network_preference|data_mode_off|data_saver_mode_on|data_usage_exceeded|user_abroad_roaming_disabled_off[PERSONA:Easy]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mobile_data_issue]bad_network_preference|data_saver_mode_on|data_usage_exceeded[PERSONA:Hard]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mobile_data_issue]bad_network_preference|user_abroad_roaming_enabled_off[PERSONA:Hard]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mobile_data_issue]bad_vpn|data_saver_mode_on|user_abroad_roaming_disabled_on[PERSONA:None]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mobile_data_issue]data_mode_off|data_usage_exceeded|user_abroad_roaming_disabled_off[PERSONA:Hard]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mobile_data_issue]data_usage_exceeded|user_abroad_roaming_enabled_off[PERSONA:Easy]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[service_issue]airplane_mode_on|break_apn_settings[PERSONA:Hard]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[service_issue]airplane_mode_on|break_apn_settings|contract_end_suspension|unseat_sim_card[PERSONA:Easy]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[service_issue]airplane_mode_on|break_apn_settings|lock_sim_card_pin[PERSONA:None]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[service_issue]airplane_mode_on|break_apn_settings|overdue_bill_suspension|unseat_sim_card[PERSONA:None]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[service_issue]airplane_mode_on|break_apn_settings|unseat_sim_card[PERSONA:None]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[service_issue]airplane_mode_on|lock_sim_card_pin|overdue_bill_suspension|unseat_sim_card[PERSONA:Easy]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[service_issue]airplane_mode_on|lock_sim_card_pin|unseat_sim_card[PERSONA:Hard]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[service_issue]airplane_mode_on|overdue_bill_suspension|unseat_sim_card[PERSONA:Easy]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[service_issue]airplane_mode_on|unseat_sim_card[PERSONA:None]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[service_issue]break_apn_settings|lock_sim_card_pin|overdue_bill_suspension|unseat_sim_card[PERSONA:Easy]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[service_issue]break_apn_settings|overdue_bill_suspension|unseat_sim_card[PERSONA:Hard]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[service_issue]contract_end_suspension|lock_sim_card_pin[PERSONA:Hard]"
+  }
+ ],
+ "VAL": [
+  {
+   "bucket": "VAL",
+   "domain": "airline",
+   "task_id": "10"
+  },
+  {
+   "bucket": "VAL",
+   "domain": "airline",
+   "task_id": "23"
+  },
+  {
+   "domain": "airline",
+   "task_id": "7"
+  },
+  {
+   "domain": "airline",
+   "task_id": "29"
+  },
+  {
+   "domain": "airline",
+   "task_id": "39"
+  },
+  {
+   "domain": "airline",
+   "task_id": "44"
+  },
+  {
+   "bucket": "VAL",
+   "domain": "retail",
+   "task_id": "11"
+  },
+  {
+   "bucket": "VAL",
+   "domain": "retail",
+   "task_id": "31"
+  },
+  {
+   "bucket": "VAL",
+   "domain": "retail",
+   "task_id": "90"
+  },
+  {
+   "domain": "retail",
+   "task_id": "29"
+  },
+  {
+   "domain": "retail",
+   "task_id": "38"
+  },
+  {
+   "domain": "retail",
+   "task_id": "54"
+  },
+  {
+   "domain": "retail",
+   "task_id": "55"
+  },
+  {
+   "domain": "retail",
+   "task_id": "60"
+  },
+  {
+   "domain": "retail",
+   "task_id": "62"
+  },
+  {
+   "domain": "retail",
+   "task_id": "63"
+  },
+  {
+   "domain": "retail",
+   "task_id": "66"
+  },
+  {
+   "domain": "retail",
+   "task_id": "67"
+  },
+  {
+   "domain": "retail",
+   "task_id": "68"
+  },
+  {
+   "domain": "retail",
+   "task_id": "70"
+  },
+  {
+   "domain": "retail",
+   "task_id": "71"
+  },
+  {
+   "domain": "retail",
+   "task_id": "74"
+  },
+  {
+   "domain": "retail",
+   "task_id": "76"
+  },
+  {
+   "domain": "retail",
+   "task_id": "78"
+  },
+  {
+   "domain": "retail",
+   "task_id": "82"
+  },
+  {
+   "domain": "retail",
+   "task_id": "85"
+  },
+  {
+   "domain": "retail",
+   "task_id": "86"
+  },
+  {
+   "domain": "retail",
+   "task_id": "87"
+  },
+  {
+   "domain": "retail",
+   "task_id": "89"
+  },
+  {
+   "domain": "retail",
+   "task_id": "91"
+  },
+  {
+   "domain": "retail",
+   "task_id": "92"
+  },
+  {
+   "domain": "retail",
+   "task_id": "95"
+  },
+  {
+   "domain": "retail",
+   "task_id": "98"
+  },
+  {
+   "domain": "retail",
+   "task_id": "99"
+  },
+  {
+   "domain": "retail",
+   "task_id": "100"
+  },
+  {
+   "domain": "retail",
+   "task_id": "101"
+  },
+  {
+   "domain": "retail",
+   "task_id": "102"
+  },
+  {
+   "domain": "retail",
+   "task_id": "103"
+  },
+  {
+   "domain": "retail",
+   "task_id": "104"
+  },
+  {
+   "domain": "retail",
+   "task_id": "105"
+  },
+  {
+   "domain": "retail",
+   "task_id": "106"
+  },
+  {
+   "domain": "retail",
+   "task_id": "108"
+  },
+  {
+   "domain": "retail",
+   "task_id": "109"
+  },
+  {
+   "domain": "retail",
+   "task_id": "110"
+  },
+  {
+   "domain": "retail",
+   "task_id": "111"
+  },
+  {
+   "domain": "retail",
+   "task_id": "112"
+  },
+  {
+   "domain": "retail",
+   "task_id": "113"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mms_issue]airplane_mode_on|bad_network_preference|bad_wifi_calling|break_apn_mms_setting|break_app_both_permissions|data_mode_off|data_usage_exceeded|unseat_sim_card|user_abroad_roaming_disabled_on[PERSONA:Hard]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mms_issue]airplane_mode_on|bad_network_preference|bad_wifi_calling|break_app_storage_permission|unseat_sim_card[PERSONA:Hard]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mms_issue]airplane_mode_on|bad_network_preference|break_apn_mms_setting|break_app_storage_permission[PERSONA:None]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mms_issue]airplane_mode_on|bad_network_preference|data_usage_exceeded[PERSONA:None]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mms_issue]bad_network_preference|bad_wifi_calling|break_apn_mms_setting|break_app_storage_permission|data_mode_off|data_usage_exceeded|unseat_sim_card[PERSONA:Easy]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mms_issue]bad_network_preference|bad_wifi_calling|break_app_both_permissions|data_usage_exceeded|user_abroad_roaming_disabled_off[PERSONA:Hard]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mms_issue]bad_network_preference|user_abroad_roaming_disabled_off[PERSONA:None]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mms_issue]bad_network_preference|user_abroad_roaming_disabled_on[PERSONA:None]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mms_issue]bad_wifi_calling|break_apn_mms_setting|unseat_sim_card|user_abroad_roaming_enabled_off[PERSONA:Easy]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mms_issue]break_apn_mms_setting|data_mode_off|data_usage_exceeded|user_abroad_roaming_disabled_on[PERSONA:Hard]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mms_issue]break_apn_mms_setting|data_mode_off|user_abroad_roaming_disabled_on[PERSONA:Hard]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mms_issue]break_app_storage_permission|data_usage_exceeded[PERSONA:Easy]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mobile_data_issue]airplane_mode_on|bad_network_preference[PERSONA:Hard]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mobile_data_issue]airplane_mode_on|bad_network_preference|bad_vpn|data_mode_off|data_saver_mode_on|data_usage_exceeded|user_abroad_roaming_disabled_off[PERSONA:Hard]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mobile_data_issue]airplane_mode_on|bad_network_preference|bad_vpn|data_saver_mode_on|data_usage_exceeded|user_abroad_roaming_enabled_off[PERSONA:None]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mobile_data_issue]bad_network_preference|bad_vpn|user_abroad_roaming_disabled_on[PERSONA:None]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mobile_data_issue]data_mode_off|data_usage_exceeded[PERSONA:None]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mobile_data_issue]data_saver_mode_on|data_usage_exceeded[PERSONA:Easy]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[service_issue]airplane_mode_on|break_apn_settings|lock_sim_card_pin|overdue_bill_suspension|unseat_sim_card[PERSONA:None]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[service_issue]lock_sim_card_pin|overdue_bill_suspension[PERSONA:Easy]"
+  }
+ ],
+ "EVAL": [
+  {
+   "bucket": "EASY",
+   "domain": "airline",
+   "task_id": "0"
+  },
+  {
+   "bucket": "MEDIUM",
+   "domain": "airline",
+   "task_id": "17"
+  },
+  {
+   "bucket": "MEDIUM",
+   "domain": "airline",
+   "task_id": "18"
+  },
+  {
+   "bucket": "EASY",
+   "domain": "airline",
+   "task_id": "25"
+  },
+  {
+   "bucket": "HARD",
+   "domain": "airline",
+   "task_id": "27"
+  },
+  {
+   "bucket": "EASY",
+   "domain": "airline",
+   "task_id": "30"
+  },
+  {
+   "bucket": "MEDIUM",
+   "domain": "airline",
+   "task_id": "48"
+  },
+  {
+   "bucket": "EASY",
+   "domain": "airline",
+   "task_id": "6"
+  },
+  {
+   "bucket": "EASY",
+   "domain": "airline",
+   "task_id": "8"
+  },
+  {
+   "bucket": "EASY",
+   "domain": "retail",
+   "task_id": "12"
+  },
+  {
+   "bucket": "EASY",
+   "domain": "retail",
+   "task_id": "14"
+  },
+  {
+   "bucket": "EASY",
+   "domain": "retail",
+   "task_id": "18"
+  },
+  {
+   "bucket": "EASY",
+   "domain": "retail",
+   "task_id": "20"
+  },
+  {
+   "bucket": "EASY",
+   "domain": "retail",
+   "task_id": "22"
+  },
+  {
+   "bucket": "EASY",
+   "domain": "retail",
+   "task_id": "23"
+  },
+  {
+   "bucket": "EASY",
+   "domain": "retail",
+   "task_id": "24"
+  },
+  {
+   "bucket": "EASY",
+   "domain": "retail",
+   "task_id": "25"
+  },
+  {
+   "bucket": "HARD",
+   "domain": "retail",
+   "task_id": "26"
+  },
+  {
+   "bucket": "EASY",
+   "domain": "retail",
+   "task_id": "27"
+  },
+  {
+   "bucket": "HARD",
+   "domain": "retail",
+   "task_id": "28"
+  },
+  {
+   "bucket": "EASY",
+   "domain": "retail",
+   "task_id": "5"
+  },
+  {
+   "bucket": "MEDIUM",
+   "domain": "retail",
+   "task_id": "6"
+  },
+  {
+   "bucket": "HARD",
+   "domain": "retail",
+   "task_id": "61"
+  },
+  {
+   "bucket": "EASY",
+   "domain": "retail",
+   "task_id": "7"
+  },
+  {
+   "bucket": "HARD",
+   "domain": "retail",
+   "task_id": "8"
+  },
+  {
+   "bucket": "MEDIUM",
+   "domain": "retail",
+   "task_id": "83"
+  },
+  {
+   "bucket": "EASY",
+   "domain": "retail",
+   "task_id": "9"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mms_issue]airplane_mode_on|bad_network_preference|bad_wifi_calling|break_apn_mms_setting|break_app_both_permissions|unseat_sim_card|user_abroad_roaming_enabled_off[PERSONA:Hard]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mms_issue]airplane_mode_on|bad_network_preference|bad_wifi_calling|break_apn_mms_setting|break_app_sms_permission|data_mode_off|data_usage_exceeded|unseat_sim_card|user_abroad_roaming_disabled_on[PERSONA:None]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mms_issue]airplane_mode_on|bad_network_preference|bad_wifi_calling|break_apn_mms_setting|break_app_storage_permission|data_mode_off|data_usage_exceeded|unseat_sim_card|user_abroad_roaming_disabled_on[PERSONA:Easy]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mms_issue]airplane_mode_on|bad_network_preference|break_app_both_permissions|data_usage_exceeded|unseat_sim_card|user_abroad_roaming_disabled_on[PERSONA:Hard]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mms_issue]airplane_mode_on|bad_network_preference|break_app_storage_permission|data_mode_off|user_abroad_roaming_enabled_off[PERSONA:Easy]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mms_issue]airplane_mode_on|bad_wifi_calling|break_app_both_permissions|data_mode_off|data_usage_exceeded|unseat_sim_card|user_abroad_roaming_enabled_off[PERSONA:None]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mms_issue]airplane_mode_on|bad_wifi_calling|user_abroad_roaming_enabled_off[PERSONA:Easy]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mms_issue]airplane_mode_on|break_app_both_permissions[PERSONA:Hard]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mms_issue]airplane_mode_on|break_app_both_permissions|data_usage_exceeded|user_abroad_roaming_disabled_off[PERSONA:None]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mms_issue]bad_network_preference|bad_wifi_calling|break_app_sms_permission|data_mode_off|data_usage_exceeded|unseat_sim_card|user_abroad_roaming_enabled_off[PERSONA:Easy]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mms_issue]bad_network_preference|break_app_both_permissions[PERSONA:Easy]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mms_issue]bad_network_preference|break_app_sms_permission|user_abroad_roaming_disabled_on[PERSONA:Hard]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mms_issue]bad_network_preference|data_mode_off|user_abroad_roaming_disabled_on[PERSONA:None]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mms_issue]bad_wifi_calling|break_apn_mms_setting|break_app_both_permissions|data_mode_off|data_usage_exceeded|user_abroad_roaming_disabled_off[PERSONA:None]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mms_issue]break_apn_mms_setting|user_abroad_roaming_enabled_off[PERSONA:Hard]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mms_issue]break_app_sms_permission|data_mode_off[PERSONA:None]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mobile_data_issue]airplane_mode_on|bad_network_preference|bad_vpn|data_mode_off|data_saver_mode_on|data_usage_exceeded|user_abroad_roaming_enabled_off[PERSONA:Easy]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mobile_data_issue]airplane_mode_on|bad_network_preference|data_mode_off|data_saver_mode_on[PERSONA:Hard]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mobile_data_issue]airplane_mode_on|data_mode_off|data_saver_mode_on|data_usage_exceeded|user_abroad_roaming_enabled_off[PERSONA:Hard]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mobile_data_issue]airplane_mode_on|data_saver_mode_on|user_abroad_roaming_disabled_on[PERSONA:None]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mobile_data_issue]bad_network_preference|bad_vpn|data_mode_off|data_saver_mode_on|data_usage_exceeded|user_abroad_roaming_enabled_off[PERSONA:Easy]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mobile_data_issue]bad_network_preference|bad_vpn|data_saver_mode_on|data_usage_exceeded|user_abroad_roaming_disabled_off[PERSONA:Easy]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mobile_data_issue]bad_network_preference|bad_vpn|user_abroad_roaming_disabled_off[PERSONA:Hard]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mobile_data_issue]bad_vpn|data_mode_off|data_usage_exceeded|user_abroad_roaming_disabled_off[PERSONA:None]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mobile_data_issue]data_saver_mode_on|user_abroad_roaming_enabled_off[PERSONA:Easy]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[service_issue]airplane_mode_on|break_apn_settings|contract_end_suspension|lock_sim_card_pin[PERSONA:None]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[service_issue]airplane_mode_on|break_apn_settings|contract_end_suspension|lock_sim_card_pin|unseat_sim_card[PERSONA:Easy]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[service_issue]airplane_mode_on|break_apn_settings|lock_sim_card_pin|overdue_bill_suspension[PERSONA:Hard]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[service_issue]airplane_mode_on|break_apn_settings|lock_sim_card_pin|unseat_sim_card[PERSONA:None]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[service_issue]airplane_mode_on|break_apn_settings|overdue_bill_suspension[PERSONA:None]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[service_issue]airplane_mode_on|contract_end_suspension|lock_sim_card_pin|unseat_sim_card[PERSONA:Hard]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[service_issue]airplane_mode_on|lock_sim_card_pin[PERSONA:Easy]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[service_issue]airplane_mode_on|lock_sim_card_pin|overdue_bill_suspension[PERSONA:Easy]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[service_issue]airplane_mode_on|overdue_bill_suspension[PERSONA:None]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[service_issue]break_apn_settings|contract_end_suspension|lock_sim_card_pin[PERSONA:Hard]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[service_issue]break_apn_settings|contract_end_suspension|lock_sim_card_pin|unseat_sim_card[PERSONA:Hard]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[service_issue]break_apn_settings|lock_sim_card_pin[PERSONA:None]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[service_issue]break_apn_settings|lock_sim_card_pin|overdue_bill_suspension[PERSONA:Easy]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[service_issue]contract_end_suspension|unseat_sim_card[PERSONA:Hard]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[service_issue]overdue_bill_suspension|unseat_sim_card[PERSONA:Easy]"
+  }
+ ],
+ "DIAG": [
+  {
+   "bucket": "DIAG",
+   "domain": "airline",
+   "task_id": "12"
+  },
+  {
+   "bucket": "DIAG",
+   "domain": "retail",
+   "task_id": "17"
+  },
+  {
+   "bucket": "DIAG",
+   "domain": "retail",
+   "task_id": "2"
+  },
+  {
+   "bucket": "DIAG",
+   "domain": "retail",
+   "task_id": "3"
+  },
+  {
+   "bucket": "DIAG",
+   "domain": "retail",
+   "task_id": "4"
+  }
+ ]
+}
