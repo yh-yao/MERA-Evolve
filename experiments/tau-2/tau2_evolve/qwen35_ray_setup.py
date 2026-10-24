@@ -25,6 +25,13 @@ class Qwen35TrainingRayWorkerGroup(RayWorkerGroup):
         # TileLang 0.1.12 segfaults in cuModuleLoadData on this CUDA 12.9
         # driver; Triton 3.3 is the validated FLA backend instead.
         worker_env["FLA_TILELANG"] = "0"
+        # Actor-only allocator settings (e.g. expandable_segments:True). Long
+        # multi-turn batches fragment the caching allocator on 32 GB cards:
+        # 16.5 GB allocated vs 26 GB reserved preceded an OOM at step 17.
+        # Never applied to vLLM rollout processes, whose allocator differs.
+        alloc_conf = os.environ.get("MERA_ACTOR_CUDA_ALLOC_CONF")
+        if alloc_conf:
+            worker_env["PYTORCH_CUDA_ALLOC_CONF"] = alloc_conf
         kwargs["worker_env"] = worker_env
         super().__init__(*args, **kwargs)
 

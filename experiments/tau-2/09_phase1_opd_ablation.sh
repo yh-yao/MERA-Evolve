@@ -60,6 +60,10 @@ export MERA_WEIGHT_TRANSFER_SHM="${MERA_WEIGHT_TRANSFER_SHM:-1}"
 export CHECKPOINT_BUCKET_MB="${CHECKPOINT_BUCKET_MB:-2560}"
 export USE_REMOVE_PADDING="${USE_REMOVE_PADDING:-True}"
 export PPO_MICRO_BATCH_SIZE="${PPO_MICRO_BATCH_SIZE:-1}"
+# A 20-step run OOMed at step 17 from allocator fragmentation; checkpoint
+# every SAVE_EVERY steps so VERL's resume_mode=auto restarts mid-run.
+export MERA_ACTOR_CUDA_ALLOC_CONF="${MERA_ACTOR_CUDA_ALLOC_CONF:-expandable_segments:True}"
+SAVE_EVERY="${SAVE_EVERY:-5}"
 TRAIN_EXTRA_ARGS=(actor_rollout_ref.model.use_fused_kernels="${USE_FUSED_KERNELS:-True}")
 
 mkdir -p "$RESULTS_DIR"
@@ -104,14 +108,16 @@ train_group_A() {
   local out="$1"
   local opd="$out/opd_traces.jsonl" sft_pairs="$out/sft_pairs.parquet" sft_adapter="$out/sft_adapter"
   : "${MERA_TEACHER_BASE_URL:?group A needs the teacher endpoint for OPD}"
-  if [[ ! -f "$opd" ]]; then
+  if [[ ! -f "$out/opd.done" ]]; then
     log "group A: collecting verified teacher suffixes (OPD)"
+    rm -f "$opd" "$out/router_data.jsonl"
     "$TAU2_PY" -m tau2_evolve.collect_opd --traces "$TRAIN_TRACES" --output "$opd" \
       --router-data "$out/router_data.jsonl" \
       --teacher-model "openai/${MERA_TEACHER_MODEL:-evol-llm-teacher}" --teacher-base-url "$MERA_TEACHER_BASE_URL" \
       --teacher-max-tokens 1024 --no-teacher-thinking \
       --user-base-url "http://127.0.0.1:$USER_PORT/v1" --max-steps 40 \
-      --branch-attempts "${OPD_BRANCH_ATTEMPTS:-3}" --workers "${OPD_WORKERS:-16}" >> "$out/opd.log" 2>&1
+      --branch-attempts "${OPD_BRANCH_ATTEMPTS:-3}" --workers "${OPD_WORKERS:-16}" >> "$out/opd.log" 2>&1 \
+      && touch "$out/opd.done" || return 1
   fi
   [[ -s "$sft_pairs" ]] || "$TRAIN_VENV/bin/python" -m tau2_evolve.traces_to_sft \
     --traces "$TRAIN_TRACES" --traces "$opd" --output "$sft_pairs" >> "$out/sft.log" 2>&1
@@ -132,14 +138,27 @@ train_group_A() {
           model.enable_gradient_checkpointing=True ) > "$out/sft.log" 2>&1 || return 1
   fi
   log "group A: GRPO from the SFT adapter"
-  # shellcheck disable=SC2046
-  env $(group_env B) LORA_ADAPTER_PATH="$sft_adapter" \
+  run_rl "$out" A "$(group_env B) LORA_ADAPTER_PATH=$sft_adapter"
+}
+
+# One RL training run with a single resume retry: VERL restarts from the
+# latest SAVE_EVERY checkpoint under OUTPUT_DIR.
+run_rl() {
+  local out="$1" name="$2" extra_env="$3" attempt
+  for attempt in 1 2; do
+    # shellcheck disable=SC2086
+    env $extra_env DISTILL_LOSS_MODE="$DISTILL_LOSS_MODE" DISTILL_LOSS_COEF="$DISTILL_LOSS_COEF" \
+      TEACHER_MODEL_PATH="${TEACHER_MODEL_PATH:-}" \
     RAY_WORKER_SETUP_HOOK=tau2_evolve.qwen35_worker_setup.install_qwen35_worker_patches \
     TRAIN_FILE="$PARQUET" TRAIN_GPU="$TRAIN_GPU" ROLLOUT_GPU="$ROLLOUT_GPU" MODEL_PATH="$BASE_MODEL" \
-    TOTAL_STEPS="$TOTAL_STEPS" SAVE_FREQ="$TOTAL_STEPS" TRAIN_BATCH_SIZE="$TRAIN_BATCH_SIZE" \
+    TOTAL_STEPS="$TOTAL_STEPS" SAVE_FREQ="$SAVE_EVERY" TRAIN_BATCH_SIZE="$TRAIN_BATCH_SIZE" \
     N_GENERATIONS="$N_GENERATIONS" ACTOR_LR="$ACTOR_LR" OUTPUT_DIR="$out/verl" \
-    EXPERIMENT_NAME="tau2_phase1_A" \
-    bash "$SCRIPT_DIR/03_grpo_only.sh" "${TRAIN_EXTRA_ARGS[@]}" > "$out/train.log" 2>&1
+      EXPERIMENT_NAME="tau2_phase1_$name" \
+      bash "$SCRIPT_DIR/03_grpo_only.sh" "${TRAIN_EXTRA_ARGS[@]}" >> "$out/train.log" 2>&1 \
+      && [[ -s "$out/verl/final_adapter_path.txt" ]] && return 0
+    log "group $name: training attempt $attempt failed; resuming from the latest checkpoint"
+  done
+  return 1
 }
 
 group_env() {
@@ -159,17 +178,9 @@ for group in $PHASE1_GROUPS; do
     if [[ "$group" == "A" ]]; then
       train_group_A "$out" || { log "group A: training FAILED (see $out/*.log)"; continue; }
     else
-    log "group $group: training ($(group_env "$group"))"
-    # shellcheck disable=SC2046
-    env $(group_env "$group") DISTILL_LOSS_MODE="$DISTILL_LOSS_MODE" DISTILL_LOSS_COEF="$DISTILL_LOSS_COEF" \
-      TEACHER_MODEL_PATH="${TEACHER_MODEL_PATH:-}" \
-      RAY_WORKER_SETUP_HOOK=tau2_evolve.qwen35_worker_setup.install_qwen35_worker_patches \
-      TRAIN_FILE="$PARQUET" TRAIN_GPU="$TRAIN_GPU" ROLLOUT_GPU="$ROLLOUT_GPU" MODEL_PATH="$BASE_MODEL" \
-      TOTAL_STEPS="$TOTAL_STEPS" SAVE_FREQ="$TOTAL_STEPS" TRAIN_BATCH_SIZE="$TRAIN_BATCH_SIZE" \
-      N_GENERATIONS="$N_GENERATIONS" ACTOR_LR="$ACTOR_LR" OUTPUT_DIR="$out/verl" \
-      EXPERIMENT_NAME="tau2_phase1_$group" \
-      bash "$SCRIPT_DIR/03_grpo_only.sh" "${TRAIN_EXTRA_ARGS[@]}" > "$out/train.log" 2>&1 \
-      || { log "group $group: training FAILED (see $out/train.log)"; continue; }
+      log "group $group: training ($(group_env "$group"))"
+      run_rl "$out" "$group" "$(group_env "$group")" \
+        || { log "group $group: training FAILED (see $out/train.log)"; continue; }
     fi
   fi
   adapter="$(cat "$out/verl/final_adapter_path.txt")"
