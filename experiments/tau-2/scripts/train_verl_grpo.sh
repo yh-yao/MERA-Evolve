@@ -46,6 +46,23 @@ VLLM_GDN_PREFILL_BACKEND="${VLLM_GDN_PREFILL_BACKEND:-}"
 VLLM_LANGUAGE_MODEL_ONLY="${VLLM_LANGUAGE_MODEL_ONLY:-}"
 RAY_WORKER_SETUP_HOOK="${RAY_WORKER_SETUP_HOOK:-}"
 REUSE_TRAINING_ADAPTER="${REUSE_TRAINING_ADAPTER:-0}"
+# On-policy distillation toward an external teacher (tau2_evolve.external_teacher).
+# DISTILLATION=1 requires MERA_TEACHER_BASE_URL and SEPARATE_ROLLOUT=1.
+DISTILLATION="${DISTILLATION:-0}"
+DISTILL_LOSS_MODE="${DISTILL_LOSS_MODE:-k3}"
+DISTILL_USE_POLICY_GRADIENT="${DISTILL_USE_POLICY_GRADIENT:-False}"
+DISTILL_USE_TASK_REWARDS="${DISTILL_USE_TASK_REWARDS:-True}"
+DISTILL_LOSS_COEF="${DISTILL_LOSS_COEF:-1.0}"
+DISTILL_TOPK="${DISTILL_TOPK:-32}"
+TEACHER_MODEL_PATH="${TEACHER_MODEL_PATH:-}"
+# Shaping weight of action recall in the training reward, optionally annealed
+# to 0 over TAU2_ACTION_RECALL_ANNEAL_ROLLOUTS rollouts (see agent_loop.py).
+export TAU2_ACTION_RECALL_WEIGHT="${TAU2_ACTION_RECALL_WEIGHT:-0.5}"
+export TAU2_ACTION_RECALL_ANNEAL_ROLLOUTS="${TAU2_ACTION_RECALL_ANNEAL_ROLLOUTS:-0}"
+export TAU2_AGENT_LOOP_WORKERS="$AGENT_LOOP_WORKERS"
+# GPUs without peer access (e.g. RTX 5090) need host shared memory for the
+# rollout weight sync; see tau2_evolve.qwen35_worker_setup.
+export MERA_WEIGHT_TRANSFER_SHM="${MERA_WEIGHT_TRANSFER_SHM:-0}"
 
 cd "$ROOT"
 source "$TRAIN_VENV/bin/activate"
@@ -128,8 +145,44 @@ if [[ "$SEPARATE_ROLLOUT" == "1" ]]; then
   )
   [[ -n "$CHECKPOINT_CUSTOM_BACKEND_MODULE" ]] && \
     SEPARATION_ARGS+=(actor_rollout_ref.rollout.checkpoint_engine.custom_backend_module="$CHECKPOINT_CUSTOM_BACKEND_MODULE")
+  if [[ "$DISTILLATION" == "1" ]]; then
+    # The one-step off-policy trainer only learns about the teacher through
+    # tau2_evolve.external_teacher's patches, which this hook installs.
+    RAY_WORKER_SETUP_HOOK=tau2_evolve.external_teacher.install_worker_patches
+  fi
   [[ -n "$RAY_WORKER_SETUP_HOOK" ]] && \
     SEPARATION_ARGS+=(+ray_kwargs.ray_init.runtime_env.worker_process_setup_hook="$RAY_WORKER_SETUP_HOOK")
+fi
+
+DISTILLATION_ARGS=()
+if [[ "$DISTILLATION" == "1" ]]; then
+  [[ "$SEPARATE_ROLLOUT" == "1" ]] || { echo "[train_verl_grpo] DISTILLATION=1 needs SEPARATE_ROLLOUT=1" >&2; exit 2; }
+  : "${MERA_TEACHER_BASE_URL:?DISTILLATION=1 needs MERA_TEACHER_BASE_URL (external teacher /v1 endpoint)}"
+  : "${TEACHER_MODEL_PATH:?DISTILLATION=1 needs TEACHER_MODEL_PATH (same tokenizer as MODEL_PATH)}"
+  export MERA_TEACHER_BASE_URL MERA_TEACHER_MODEL="${MERA_TEACHER_MODEL:-evol-llm-teacher}"
+  # Token-level KL needs an identical vocabulary on both sides.
+  "$TRAIN_VENV/bin/python" - "$MODEL_PATH" "$TEACHER_MODEL_PATH" <<'PY'
+import sys
+from transformers import AutoTokenizer
+student, teacher = (AutoTokenizer.from_pretrained(p, trust_remote_code=True) for p in sys.argv[1:3])
+assert student.get_vocab() == teacher.get_vocab(), "student and teacher tokenizers differ"
+print(f"[train_verl_grpo] tokenizer check ok: {len(student.get_vocab())} tokens")
+PY
+  # The teacher pool below is nominal: the one-step trainer never allocates
+  # it, but DistillationConfig validates its size. The real teacher is the
+  # external server at MERA_TEACHER_BASE_URL.
+  DISTILLATION_ARGS+=(
+    distillation.enabled=True
+    distillation.nnodes=1 distillation.n_gpus_per_node=1
+    distillation.teacher_models.teacher_model.model_path="$TEACHER_MODEL_PATH"
+    distillation.teacher_models.teacher_model.inference.tensor_model_parallel_size=1
+    distillation.teacher_models.teacher_model.inference.temperature=1.0
+    distillation.distillation_loss.loss_mode="$DISTILL_LOSS_MODE"
+    distillation.distillation_loss.use_policy_gradient="$DISTILL_USE_POLICY_GRADIENT"
+    distillation.distillation_loss.use_task_rewards="$DISTILL_USE_TASK_REWARDS"
+    distillation.distillation_loss.distillation_loss_coef="$DISTILL_LOSS_COEF"
+    distillation.distillation_loss.topk="$DISTILL_TOPK"
+  )
 fi
 
 python -m "$TRAIN_ENTRYPOINT" \
@@ -175,7 +228,7 @@ python -m "$TRAIN_ENTRYPOINT" \
   trainer.default_local_dir="$OUTPUT_DIR" \
   'trainer.logger=["console"]' \
   "${LORA_ARGS[@]}" "${CHAT_TEMPLATE_ARGS[@]}" "${MODEL_CONFIG_ARGS[@]}" "${VLLM_ENGINE_ARGS[@]}" \
-  "${SEPARATION_ARGS[@]}" "$@"
+  "${SEPARATION_ARGS[@]}" "${DISTILLATION_ARGS[@]}" "$@"
 
 ADAPTER_PATH="$(find "$OUTPUT_DIR" -mindepth 3 -maxdepth 3 -type d -path '*/actor/lora_adapter' -print | sort -V | tail -n 1)"
 if [[ -z "$ADAPTER_PATH" ]]; then

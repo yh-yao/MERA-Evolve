@@ -11,6 +11,27 @@ from tau2_evolve.interaction import Tau2Interaction
 _INTERACTING = object()
 
 
+def official_reward_weight(finished_rollouts: int) -> float:
+    """Weight of the official tau2 pass signal; the rest goes to action recall.
+
+    TAU2_ACTION_RECALL_WEIGHT (default 0.5, the historical value) is the
+    initial shaping weight. With TAU2_ACTION_RECALL_ANNEAL_ROLLOUTS=N > 0 it
+    decays linearly to 0 over N rollouts, so late training optimizes only the
+    official reward (improvement plan, Phase 1). ``finished_rollouts`` is an
+    estimate of the global count: this worker's count times the number of
+    agent-loop workers (TAU2_AGENT_LOOP_WORKERS), since VERL spreads samples
+    evenly across workers.
+    """
+    import os
+
+    start = float(os.environ.get("TAU2_ACTION_RECALL_WEIGHT", "0.5"))
+    horizon = int(os.environ.get("TAU2_ACTION_RECALL_ANNEAL_ROLLOUTS", "0"))
+    if not 0.0 <= start <= 1.0:
+        raise ValueError(f"TAU2_ACTION_RECALL_WEIGHT must be in [0, 1], got {start}")
+    recall_weight = start if horizon <= 0 else start * max(0.0, 1.0 - finished_rollouts / horizon)
+    return 1.0 - recall_weight
+
+
 def _bounded_sampling_params(
     sampling_params: dict,
     *,
@@ -44,9 +65,16 @@ class Tau2AgentLoop(ToolAgentLoop):
     token accounting, and tool parser implementation.
     """
 
+    # Rollouts finished in this worker process, for the shaping anneal.
+    _finished_rollouts = 0
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.interaction = Tau2Interaction({"official_reward_weight": 0.5})
+        import os
+
+        workers = max(1, int(os.environ.get("TAU2_AGENT_LOOP_WORKERS", "1")))
+        weight = official_reward_weight(Tau2AgentLoop._finished_rollouts * workers)
+        self.interaction = Tau2Interaction({"official_reward_weight": weight})
         configured_model_length = getattr(self.rollout_config, "max_model_len", None)
         self.max_model_length = int(
             configured_model_length or self.prompt_length + self.response_length
@@ -136,6 +164,7 @@ class Tau2AgentLoop(ToolAgentLoop):
             {"turn_scores": agent_data.turn_scores, "tool_rewards": agent_data.tool_rewards}
         )
         output.reward_score = float(sum(agent_data.turn_scores))
+        Tau2AgentLoop._finished_rollouts += 1
         return output
 
     async def _handle_generating_state(self, agent_data, sampling_params, ignore_termination=False):
