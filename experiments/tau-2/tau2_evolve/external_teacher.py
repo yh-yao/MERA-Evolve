@@ -152,7 +152,11 @@ def external_teacher_clients(config) -> dict[str, ExternalTeacherClient]:
         raise RuntimeError("distillation is enabled but MERA_TEACHER_BASE_URL is not set")
     model = os.environ.get("MERA_TEACHER_MODEL", "evol-llm-teacher")
     timeout_s = float(os.environ.get("MERA_TEACHER_TIMEOUT_S", "600"))
-    keys = list(config.distillation.teacher_models.keys())
+    # Clients are looked up by the *resolved* teacher key ("default" for a
+    # single teacher), not by the YAML entry name ("teacher_model").
+    from verl.utils.config import omega_conf_to_dataclass
+
+    keys = list(omega_conf_to_dataclass(config.distillation).teacher_models.keys())
     return {key: ExternalTeacherClient(base_url, model, timeout_s) for key in keys}
 
 
