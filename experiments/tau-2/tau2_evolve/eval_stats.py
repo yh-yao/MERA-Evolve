@@ -20,7 +20,7 @@ Reported quantities:
 
 Usage:
   python -m tau2_evolve.eval_stats summary RUN.jsonl [--k 4]
-  python -m tau2_evolve.eval_stats compare --baseline A.jsonl --candidate B.jsonl
+  python -m tau2_evolve.eval_stats compare --baseline A1.jsonl [A2.jsonl] --candidate B1.jsonl [B2.jsonl]
   python -m tau2_evolve.eval_stats repeatability RUN1.jsonl RUN2.jsonl
 """
 from __future__ import annotations
@@ -55,6 +55,28 @@ def load_trials(path: Path) -> dict[TaskKey, dict[int, bool]]:
             raise ValueError(f"duplicate {key} trial {trial} in {path}:{line_number}")
         out[key][trial] = float(row.get("reward", 0.0) or 0.0) > 0.0
     return dict(out)
+
+
+def load_runs(paths: list[Path]) -> dict[TaskKey, dict[int, bool]]:
+    """Pool several runs of one configuration into one multi-trial result.
+
+    Trials are renumbered in file order (run 0's trials first), so two
+    4-trial runs with different seed blocks become one 8-trial result. All
+    files must cover the same task set.
+    """
+    merged: dict[TaskKey, dict[int, bool]] = {}
+    offset = 0
+    for path in paths:
+        run = load_trials(path)
+        if merged and run.keys() != merged.keys():
+            raise ValueError(f"{path} covers a different task set than {paths[0]}")
+        width = max(len(v) for v in run.values())
+        for key, trials in run.items():
+            target = merged.setdefault(key, {})
+            for index, (_, passed) in enumerate(sorted(trials.items())):
+                target[offset + index] = passed
+        offset += width
+    return merged
 
 
 def pass_hat_k(n: int, c: int, k: int) -> float:
@@ -199,8 +221,10 @@ def main() -> int:
     s.add_argument("runs", type=Path, nargs="+")
     s.add_argument("--k", type=int, default=None)
     c = sub.add_parser("compare")
-    c.add_argument("--baseline", type=Path, required=True)
-    c.add_argument("--candidate", type=Path, required=True)
+    c.add_argument("--baseline", type=Path, nargs="+", required=True,
+                   help="one or more runs of the baseline config (pooled)")
+    c.add_argument("--candidate", type=Path, nargs="+", required=True,
+                   help="one or more runs of the candidate config (pooled)")
     c.add_argument("--json", type=Path)
     r = sub.add_parser("repeatability", help="two runs of the same config -> noise level and MDD")
     r.add_argument("run1", type=Path)
@@ -213,8 +237,8 @@ def main() -> int:
             _print_summary(path, args.k)
         return 0
     if args.cmd == "compare":
-        result = compare(load_trials(args.baseline), load_trials(args.candidate))
-        _print_compare(result, f"{args.baseline} -> {args.candidate}")
+        result = compare(load_runs(args.baseline), load_runs(args.candidate))
+        _print_compare(result, f"{[str(p) for p in args.baseline]} -> {[str(p) for p in args.candidate]}")
     else:
         result = compare(load_trials(args.run1), load_trials(args.run2))
         _print_compare(result, f"repeatability {args.run1} vs {args.run2}")

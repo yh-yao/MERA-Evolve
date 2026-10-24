@@ -50,8 +50,15 @@ export PYTHONPATH="$SCRIPT_DIR:$SCRIPT_DIR/compat:${PYTHONPATH:-}"
 export PATH="$TRAIN_VENV/bin:$PATH"
 export CUDA_HOME="${QWEN35_CUDA_HOME:-$ROOT/.deps/cuda-12.8}"
 export LD_LIBRARY_PATH="$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
+# RTX 5090 settings validated by a 2-step smoke run (2026-10-24): no CUDA
+# peer access -> host-shm weight sync; the fp32 embedding (2 GB) must fit
+# one bucket; fused log-prob kernels (which require remove-padding) avoid
+# materializing 248k-vocab logits that OOM a 32 GB card.
 export MERA_WEIGHT_TRANSFER_SHM="${MERA_WEIGHT_TRANSFER_SHM:-1}"
 export CHECKPOINT_BUCKET_MB="${CHECKPOINT_BUCKET_MB:-2560}"
+export USE_REMOVE_PADDING="${USE_REMOVE_PADDING:-True}"
+export PPO_MICRO_BATCH_SIZE="${PPO_MICRO_BATCH_SIZE:-1}"
+TRAIN_EXTRA_ARGS=(actor_rollout_ref.model.use_fused_kernels="${USE_FUSED_KERNELS:-True}")
 
 mkdir -p "$RESULTS_DIR"
 LOG="$RESULTS_DIR/phase1.log"
@@ -110,7 +117,7 @@ for group in $PHASE1_GROUPS; do
       TOTAL_STEPS="$TOTAL_STEPS" SAVE_FREQ="$TOTAL_STEPS" TRAIN_BATCH_SIZE="$TRAIN_BATCH_SIZE" \
       N_GENERATIONS="$N_GENERATIONS" ACTOR_LR="$ACTOR_LR" OUTPUT_DIR="$out/verl" \
       EXPERIMENT_NAME="tau2_phase1_$group" \
-      bash "$SCRIPT_DIR/03_grpo_only.sh" > "$out/train.log" 2>&1 \
+      bash "$SCRIPT_DIR/03_grpo_only.sh" "${TRAIN_EXTRA_ARGS[@]}" > "$out/train.log" 2>&1 \
       || { log "group $group: training FAILED (see $out/train.log)"; continue; }
   fi
   adapter="$(cat "$out/verl/final_adapter_path.txt")"

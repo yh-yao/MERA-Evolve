@@ -98,3 +98,14 @@ def test_partition_v2_is_disjoint_and_keeps_v1_airline_retail_eval() -> None:
     # Phase 0 acceptance: VAL large enough for checkpoint selection, telecom EVAL > 8.
     assert len(v2["VAL"]) >= 40
     assert sum(r["domain"] == "telecom" for r in v2["EVAL"]) >= 30
+
+
+def test_load_runs_pools_trials_in_file_order(tmp_path: Path) -> None:
+    a = _write(tmp_path / "a.jsonl", _rows({"x": [1, 0], "y": [0, 0]}))
+    b = _write(tmp_path / "b.jsonl", _rows({"x": [1, 1], "y": [1, 0]}))
+    pooled = eval_stats.load_runs([a, b])
+    assert pooled[("retail", "x")] == {0: True, 1: False, 2: True, 3: True}
+    assert eval_stats.summarize(pooled)["n_trials"] == 4
+    c = _write(tmp_path / "c.jsonl", _rows({"z": [1]}))
+    with pytest.raises(ValueError, match="different task set"):
+        eval_stats.load_runs([a, c])
