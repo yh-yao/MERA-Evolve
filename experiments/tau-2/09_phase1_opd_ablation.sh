@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Phase 1: on-policy distillation ablation under one rollout budget.
 #
+#   A  current method               teacher-suffix SFT (verified 27B rescues of
+#                                   failed student prefixes), then GRPO as B
 #   B  GRPO only                    reward = official + annealed action recall
 #   C  distillation only            reverse-KL to the teacher, no task reward
 #   D  GRPO + distillation (main)   reward as B, plus reverse-KL to the teacher
@@ -13,9 +15,9 @@
 #
 # Required:
 #   RESULTS_DIR          absolute, one per configuration (immutable evidence)
-#   PHASE1_GROUPS        subset of "B C D E" (default: all)
+#   PHASE1_GROUPS        subset of "A B C D E" (default: B C D E)
 #   TRAIN_GPU ROLLOUT_GPU AGENT_GPU USER_GPU
-#   MERA_TEACHER_BASE_URL  external teacher /v1 (needed by C, D, E)
+#   MERA_TEACHER_BASE_URL  external teacher /v1 (needed by A, C, D, E)
 #   TEACHER_MODEL_PATH     teacher weights (tokenizer check)
 #   BASE_MODEL USER_MODEL_PATH VLLM_BIN
 set -euo pipefail
@@ -94,6 +96,52 @@ if [[ ! -s "$PARQUET" ]]; then
     --user-base-url "http://127.0.0.1:$USER_PORT/v1" --no-user-thinking >> "$LOG" 2>&1
 fi
 
+# A: the pre-plan recipe with the teacher swapped for the 27B. OPD replays
+# failed base-student prefixes and keeps only verified teacher suffixes; SFT
+# trains on those suffixes (prefix tokens are context only), then GRPO
+# continues from the SFT adapter with group B's reward and budget.
+train_group_A() {
+  local out="$1"
+  local opd="$out/opd_traces.jsonl" sft_pairs="$out/sft_pairs.parquet" sft_adapter="$out/sft_adapter"
+  : "${MERA_TEACHER_BASE_URL:?group A needs the teacher endpoint for OPD}"
+  if [[ ! -f "$opd" ]]; then
+    log "group A: collecting verified teacher suffixes (OPD)"
+    "$TAU2_PY" -m tau2_evolve.collect_opd --traces "$TRAIN_TRACES" --output "$opd" \
+      --router-data "$out/router_data.jsonl" \
+      --teacher-model "openai/${MERA_TEACHER_MODEL:-evol-llm-teacher}" --teacher-base-url "$MERA_TEACHER_BASE_URL" \
+      --teacher-max-tokens 1024 --no-teacher-thinking \
+      --user-base-url "http://127.0.0.1:$USER_PORT/v1" --max-steps 40 \
+      --branch-attempts "${OPD_BRANCH_ATTEMPTS:-3}" --workers "${OPD_WORKERS:-16}" >> "$out/opd.log" 2>&1
+  fi
+  [[ -s "$sft_pairs" ]] || "$TRAIN_VENV/bin/python" -m tau2_evolve.traces_to_sft \
+    --traces "$TRAIN_TRACES" --traces "$opd" --output "$sft_pairs" >> "$out/sft.log" 2>&1
+  if [[ ! -s "$sft_adapter/adapter_model.safetensors" ]]; then
+    log "group A: teacher-suffix SFT"
+    ( cd "$ROOT" && source "$TRAIN_VENV/bin/activate" && \
+      env CUDA_VISIBLE_DEVICES="$TRAIN_GPU" PYTHON="$TRAIN_VENV/bin/python" \
+        SFT_DATA="$sft_pairs" SFT_OUTPUT_DIR="$sft_adapter" MODEL_PATH="$BASE_MODEL" \
+        SFT_BATCH_SIZE="${SFT_BATCH_SIZE:-2}" SFT_MICRO_BATCH_SIZE_PER_GPU=1 \
+        SFT_LR="${SFT_LR:-1e-7}" SFT_TOTAL_EPOCHS="${SFT_TOTAL_EPOCHS:-1}" \
+        SFT_MAX_LENGTH="${SFT_MAX_LENGTH:-24576}" SFT_MAX_TOKEN_LEN_PER_GPU="${SFT_MAX_LENGTH:-24576}" \
+        QWEN35_ENABLE_VERL_PATCHES=1 QWEN35_TRAIN_TRITON_OVERLAY="$ROOT/.deps/qwen35-triton33" FLA_TILELANG=0 \
+        SFT_ENABLE_THINKING=False SFT_ATTN_IMPLEMENTATION=sdpa SFT_USE_TORCH_COMPILE=False \
+        SFT_DATASET_PATH="$SCRIPT_DIR/tau2_evolve/sft_dataset.py" SFT_DATASET_NAME=Qwen35MultiTurnSFTDataset \
+        SFT_SAVE_FREQ=-1 SFT_PROJECT_NAME=tau2_phase1 SFT_EXPERIMENT_NAME=group_A_sft \
+        bash scripts/train_sft.sh data.num_workers=0 \
+          model.use_remove_padding=True model.use_fused_kernels="${USE_FUSED_KERNELS:-True}" \
+          model.enable_gradient_checkpointing=True ) > "$out/sft.log" 2>&1 || return 1
+  fi
+  log "group A: GRPO from the SFT adapter"
+  # shellcheck disable=SC2046
+  env $(group_env B) LORA_ADAPTER_PATH="$sft_adapter" \
+    RAY_WORKER_SETUP_HOOK=tau2_evolve.qwen35_worker_setup.install_qwen35_worker_patches \
+    TRAIN_FILE="$PARQUET" TRAIN_GPU="$TRAIN_GPU" ROLLOUT_GPU="$ROLLOUT_GPU" MODEL_PATH="$BASE_MODEL" \
+    TOTAL_STEPS="$TOTAL_STEPS" SAVE_FREQ="$TOTAL_STEPS" TRAIN_BATCH_SIZE="$TRAIN_BATCH_SIZE" \
+    N_GENERATIONS="$N_GENERATIONS" ACTOR_LR="$ACTOR_LR" OUTPUT_DIR="$out/verl" \
+    EXPERIMENT_NAME="tau2_phase1_A" \
+    bash "$SCRIPT_DIR/03_grpo_only.sh" "${TRAIN_EXTRA_ARGS[@]}" > "$out/train.log" 2>&1
+}
+
 group_env() {
   case "$1" in
     B) echo "DISTILLATION=0 TAU2_ACTION_RECALL_WEIGHT=0.5 TAU2_ACTION_RECALL_ANNEAL_ROLLOUTS=$TOTAL_ROLLOUTS" ;;
@@ -108,6 +156,9 @@ for group in $PHASE1_GROUPS; do
   out="$RESULTS_DIR/group_$group"
   mkdir -p "$out"
   if [[ ! -s "$out/verl/final_adapter_path.txt" ]]; then
+    if [[ "$group" == "A" ]]; then
+      train_group_A "$out" || { log "group A: training FAILED (see $out/*.log)"; continue; }
+    else
     log "group $group: training ($(group_env "$group"))"
     # shellcheck disable=SC2046
     env $(group_env "$group") DISTILL_LOSS_MODE="$DISTILL_LOSS_MODE" DISTILL_LOSS_COEF="$DISTILL_LOSS_COEF" \
@@ -119,6 +170,7 @@ for group in $PHASE1_GROUPS; do
       EXPERIMENT_NAME="tau2_phase1_$group" \
       bash "$SCRIPT_DIR/03_grpo_only.sh" "${TRAIN_EXTRA_ARGS[@]}" > "$out/train.log" 2>&1 \
       || { log "group $group: training FAILED (see $out/train.log)"; continue; }
+    fi
   fi
   adapter="$(cat "$out/verl/final_adapter_path.txt")"
   log "group $group: evaluating $adapter on VAL"
