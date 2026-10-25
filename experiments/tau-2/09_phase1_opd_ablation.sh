@@ -68,6 +68,14 @@ export PPO_MICRO_BATCH_SIZE="${PPO_MICRO_BATCH_SIZE:-1}"
 export MERA_ACTOR_CUDA_ALLOC_CONF="${MERA_ACTOR_CUDA_ALLOC_CONF:-expandable_segments:True}"
 SAVE_EVERY="${SAVE_EVERY:-5}"
 TRAIN_EXTRA_ARGS=(actor_rollout_ref.model.use_fused_kernels="${USE_FUSED_KERNELS:-True}")
+# Native Qwen3.5 protocol (tau2_evolve.native_chat): XML tool calls, tools
+# rendered by the chat template, and horizons long enough for a tau2 task
+# (base frontier conversations: median 28 messages; eval allows 60 steps).
+export TOOL_FORMAT="${TOOL_FORMAT:-qwen3_coder}"
+export MAX_TURNS="${MAX_TURNS:-30}"
+export MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-8192}"
+export MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-12288}"
+export LORA_TARGET_MODULES="${LORA_TARGET_MODULES:-[q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj]}"
 
 mkdir -p "$RESULTS_DIR"
 LOG="$RESULTS_DIR/phase1.log"

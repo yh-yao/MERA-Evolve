@@ -1,5 +1,7 @@
 """Tau2 specialization of verl's native multi-turn ToolAgentLoop."""
 import json
+import os
+from types import SimpleNamespace
 from uuid import uuid4
 
 from verl.experimental.agent_loop.agent_loop import AgentLoopOutput, register
@@ -105,7 +107,26 @@ class Tau2AgentLoop(ToolAgentLoop):
 
         extra_info = kwargs.get("extra_info", {}) or {}
         tool_selection = extra_info.get("tool_selection")
-        if tool_selection and self.tools:
+        agent_data._native = bool(extra_info.get("tau2_tools_json"))
+        if agent_data._native:
+            # Native format (see native_chat): the prompt is tau2's own message
+            # list and tools rendered by the model's chat template, exactly as
+            # the evaluation endpoint renders them.
+            from verl.tools.schemas import OpenAIFunctionToolSchema
+
+            from tau2_evolve import native_chat
+
+            schemas = json.loads(extra_info["tau2_tools_json"])
+            agent_data.messages = native_chat.template_messages(json.loads(extra_info["tau2_init_messages_json"]))
+            agent_data._active_tool_schemas = schemas
+            # The XML parser needs typed schemas to convert parameter values
+            # (ints, objects) the way vLLM's qwen3_xml parser does at eval.
+            agent_data._active_tools = {
+                sc["function"]["name"]: SimpleNamespace(tool_schema=OpenAIFunctionToolSchema.model_validate(sc))
+                for sc in schemas
+            }
+            agent_data._litellm_history = json.loads(extra_info["tau2_init_messages_json"])
+        elif tool_selection and self.tools:
             selected = {name: self.tools[name] for name in tool_selection if name in self.tools}
             agent_data._active_tools = selected
             agent_data._active_tool_schemas = [
@@ -130,6 +151,8 @@ class Tau2AgentLoop(ToolAgentLoop):
                 await self.interaction.finalize_interaction(request_id)
                 state = AgentState.TERMINATED
 
+        if getattr(agent_data, "_native", False):
+            await self._record_native_alignment(agent_data)
         response_ids = agent_data.prompt_ids[-len(agent_data.response_mask) :]
         prompt_ids = agent_data.prompt_ids[: len(agent_data.prompt_ids) - len(agent_data.response_mask)]
         output_multi_modal_data = {}
@@ -185,6 +208,8 @@ class Tau2AgentLoop(ToolAgentLoop):
         state = await super()._handle_generating_state(
             agent_data, bounded_sampling_params, ignore_termination=ignore_termination
         )
+        if getattr(agent_data, "_native", False):
+            return await self._after_native_generation(agent_data)
         if agent_data.tool_calls:
             call = agent_data.tool_calls[0]
             try:
@@ -216,7 +241,117 @@ class Tau2AgentLoop(ToolAgentLoop):
         agent_data.tool_calls = []
         return _INTERACTING
 
+    async def _record_native_alignment(self, agent_data) -> None:
+        """Metric: does the sampled sequence equal the eval-time re-render?
+
+        native_align_exact=1 when the accumulated tokens equal the chat
+        template's render of the final conversation; native_align_think_only=1
+        when they differ only by the empty <think></think> the template drops
+        from older assistant turns (a known, benign gap).
+        """
+        from tau2_evolve import native_chat
+
+        history = agent_data._litellm_history
+        schemas = agent_data._active_tool_schemas
+
+        def compare():
+            train = self.tokenizer.decode(agent_data.prompt_ids)
+            ref = native_chat.render_text(self.tokenizer, history, schemas, add_generation_prompt=False)
+            exact = train.rstrip() == ref.rstrip() or ref.startswith(train) or train.startswith(ref.rstrip())
+            strip = lambda t: t.replace("<think>\n\n</think>\n\n", "").rstrip()
+            think_only = not exact and (strip(ref).startswith(strip(train)) or strip(train).startswith(strip(ref)))
+            return int(exact), int(think_only)
+
+        try:
+            exact, think_only = await self.loop.run_in_executor(None, compare)
+        except Exception:  # noqa: BLE001 - a metric must never kill a rollout
+            exact, think_only = 0, 0
+        # VERL's AgentLoopMetrics has a fixed schema and drops unknown keys, so
+        # audit records go to a JSONL file (MERA_ROLLOUT_AUDIT_DIR) instead.
+        audit_dir = os.environ.get("MERA_ROLLOUT_AUDIT_DIR")
+        if audit_dir:
+            record = {
+                "align_exact": exact, "align_think_only": think_only,
+                "assistant_turns": agent_data.assistant_turns, "user_turns": agent_data.user_turns,
+                "tool_calls": sum(len(m.get("tool_calls") or []) for m in history if m.get("role") == "assistant"),
+                "reward": float(sum(agent_data.turn_scores)), "response_tokens": len(agent_data.response_mask),
+            }
+            try:
+                os.makedirs(audit_dir, exist_ok=True)
+                with open(os.path.join(audit_dir, f"rollouts_{os.getpid()}.jsonl"), "a") as f:
+                    f.write(json.dumps(record) + "\n")
+            except OSError:
+                pass
+
+    def _limits_reached(self, agent_data) -> bool:
+        return (
+            len(agent_data.response_mask) >= self.response_length
+            or bool(self.max_assistant_turns and agent_data.assistant_turns >= self.max_assistant_turns)
+            or bool(self.max_user_turns and agent_data.user_turns >= self.max_user_turns)
+        )
+
+    async def _terminate(self, agent_data):
+        reward = await self.interaction.force_terminate(agent_data.request_id)
+        agent_data.turn_scores.append(reward)
+        await self.interaction.finalize_interaction(agent_data.request_id)
+        return AgentState.TERMINATED
+
+    async def _after_native_generation(self, agent_data):
+        """Parse the sampled XML tool calls; hand the turn to tau2 next."""
+        from tau2_evolve import native_chat
+
+        tools = [t.tool_schema for t in agent_data._active_tools.values()]
+        text, calls = await self.tool_parser.extract_tool_calls(agent_data.response_ids, tools)
+        if calls:
+            content = text
+        else:
+            content = await self.loop.run_in_executor(
+                None, lambda: self.tokenizer.decode(agent_data.response_ids, skip_special_tokens=True)
+            )
+        parsed = []
+        for call in calls:
+            try:
+                parsed.append((call.name, json.loads(call.arguments)))
+            except json.JSONDecodeError:
+                parsed.append((call.name, {}))
+        agent_data._pending_assistant = native_chat.assistant_message(
+            content.strip(), parsed, agent_data.assistant_turns
+        )
+        agent_data.metrics["native_tool_calls"] = agent_data.metrics.get("native_tool_calls", 0) + len(parsed)
+        agent_data.tool_calls = []
+        if self._limits_reached(agent_data):
+            return await self._terminate(agent_data)
+        return _INTERACTING
+
+    async def _handle_native_interacting_state(self, agent_data):
+        from tau2_evolve import native_chat
+
+        assistant = agent_data._pending_assistant
+        done, new_messages, reward, extra = await self.interaction.step_native(agent_data.request_id, assistant)
+        agent_data.user_turns += 1
+        if reward is not None:
+            agent_data.turn_scores.append(reward)
+        history = agent_data._litellm_history + [assistant]
+        if done or not new_messages:
+            agent_data._litellm_history = history
+            await self.interaction.finalize_interaction(agent_data.request_id)
+            return AgentState.TERMINATED
+        schemas = agent_data._active_tool_schemas
+        ids = await self.loop.run_in_executor(
+            None, lambda: native_chat.env_suffix_ids(self.tokenizer, history, new_messages, schemas)
+        )
+        agent_data._litellm_history = history + new_messages
+        if len(agent_data.response_mask) + len(ids) >= self.response_length:
+            return await self._terminate(agent_data)
+        agent_data.prompt_ids += ids
+        agent_data.response_mask += [0] * len(ids)
+        if agent_data.response_logprobs:
+            agent_data.response_logprobs += [0.0] * len(ids)
+        return AgentState.GENERATING
+
     async def _handle_interacting_state(self, agent_data):
+        if getattr(agent_data, "_native", False):
+            return await self._handle_native_interacting_state(agent_data)
         terminate, response, reward, extra = await self.interaction.generate_response(
             agent_data.request_id, agent_data.messages, **agent_data.interaction_kwargs
         )

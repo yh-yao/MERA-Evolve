@@ -152,6 +152,78 @@ class Tau2Interaction:
                 orch._cleanup()
         return orch.done, response, reward, {"tau2_reward": reward, "observation_role": observation_role}
 
+    async def step_native(
+        self, instance_id: str, assistant: dict[str, Any]
+    ) -> tuple[bool, list[dict[str, Any]], float, dict[str, Any]]:
+        """Advance tau2 with a parsed, native-format assistant turn.
+
+        ``assistant`` is an OpenAI-format message (content + tool_calls) built
+        from the model's own XML tool calls, so the environment receives what
+        evaluation's vLLM parser would have produced -- including several
+        calls in one turn. Returns (done, new messages in the litellm format
+        tau2 sends to the model, reward, extra).
+        """
+        import json as _json
+
+        from adapters.tau2_bench.adapter import _communication_mode, _evaluation_type_for
+        from tau2.data_model.message import AssistantMessage, MultiToolMessage, ToolCall
+        from tau2.data_model.simulation import TerminationReason
+        from tau2.orchestrator.orchestrator import Role
+
+        from tau2_evolve import native_chat
+
+        state = self._instances[instance_id]
+        orch = state["orch"]
+        try:
+            calls = []
+            for call in assistant.get("tool_calls") or []:
+                fn = call["function"]
+                args = fn.get("arguments") or {}
+                if isinstance(args, str):
+                    args = _json.loads(args)
+                calls.append(ToolCall(id=call["id"], name=fn["name"], arguments=args, requestor="assistant"))
+            agent_msg = AssistantMessage(
+                role="assistant", content=assistant.get("content") or None, tool_calls=calls or None
+            )
+            agent_msg.validate()
+            orch.trajectory.append(agent_msg)
+            orch.message = agent_msg
+            orch.from_role = Role.AGENT
+            orch.to_role = Role.ENV if agent_msg.is_tool_call() else Role.USER
+            if orch.agent.is_stop(agent_msg):
+                orch.done = True
+                orch.termination_reason = TerminationReason.AGENT_STOP
+            if not orch.done:
+                orch.step()
+                orch._check_termination()
+        except Exception as exc:
+            orch.done = True
+            orch.termination_reason = TerminationReason.AGENT_ERROR
+            state["score"] = 0.0
+            state["finalized"] = True
+            orch._cleanup()
+            print(f"[tau2-verl] native interaction failed for {instance_id}: {exc}", file=sys.stderr)
+            return True, [], 0.0, {"tau2_reward": 0.0, "interaction_error": str(exc)}
+
+        observation = orch.message
+        if isinstance(observation, MultiToolMessage):
+            new = native_chat.litellm_messages(list(observation.tool_messages))
+        elif observation is not None and observation is not agent_msg:
+            new = native_chat.litellm_messages([observation])
+        else:
+            new = []
+
+        reward = 0.0
+        if orch.done:
+            try:
+                reward = self._evaluate_state(state, _evaluation_type_for, _communication_mode)
+            except Exception as exc:
+                print(f"[tau2-verl] evaluation failed for {instance_id}: {exc}", file=sys.stderr)
+                state["score"] = 0.0
+                state["finalized"] = True
+                orch._cleanup()
+        return orch.done, new, reward, {"tau2_reward": reward}
+
     def _evaluate_state(self, state, evaluation_type_for=None, communication_mode=None) -> float:
         if state["finalized"]:
             return float(state["score"])
