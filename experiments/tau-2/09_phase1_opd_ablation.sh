@@ -42,6 +42,9 @@ TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-4}"
 N_GENERATIONS="${N_GENERATIONS:-8}"
 ACTOR_LR="${ACTOR_LR:-2e-6}"
 TOTAL_ROLLOUTS=$((TOTAL_STEPS * TRAIN_BATCH_SIZE * N_GENERATIONS))
+# A pre-built GRPO parquet (e.g. frontier-filtered prompts) replaces the
+# default all-TRAIN prompts; it must embed this run's USER_PORT.
+[[ -n "${GRPO_PARQUET:-}" ]] && { mkdir -p "$RESULTS_DIR"; cp "$GRPO_PARQUET" "$RESULTS_DIR/grpo_train.parquet"; }
 DISTILL_LOSS_MODE="${DISTILL_LOSS_MODE:-k3}"
 DISTILL_LOSS_COEF="${DISTILL_LOSS_COEF:-1.0}"
 
@@ -190,7 +193,7 @@ for group in $PHASE1_GROUPS; do
     kill "$(cat "$RESULTS_DIR/servers/evol-llm-agent_server.pid")" 2>/dev/null || true
     rm -f "$RESULTS_DIR/servers/evol-llm-agent_server.pid"; sleep 15
   fi
-  RESULTS_DIR="$out/eval" AGENT_ADAPTER="$adapter" RUN_LABEL="$group" BUCKETS=VAL RUN_SEEDS="300 1300" \
+  RESULTS_DIR="$out/eval" AGENT_ADAPTER="$adapter" RUN_LABEL="$group" BUCKETS=VAL RUN_SEEDS="${EVAL_RUN_SEEDS:-300 1300}" \
     AGENT_PORT="$AGENT_PORT" USER_PORT="$USER_PORT" \
     bash "$SCRIPT_DIR/08_phase0_eval_protocol.sh" >> "$LOG" 2>&1
   kill "$(cat "$out/eval/evol-llm-agent_server.pid")" 2>/dev/null || true; sleep 15

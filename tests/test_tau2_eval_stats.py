@@ -109,3 +109,17 @@ def test_load_runs_pools_trials_in_file_order(tmp_path: Path) -> None:
     c = _write(tmp_path / "c.jsonl", _rows({"z": [1]}))
     with pytest.raises(ValueError, match="different task set"):
         eval_stats.load_runs([a, c])
+
+
+def test_frontier_split_buckets_by_success_rate() -> None:
+    from tau2_evolve import frontier
+
+    rows = _rows({"a": [0, 0, 0], "b": [1, 0, 1], "c": [1, 1, 1]})
+    by_task, stats = frontier.split(rows)
+    assert stats["n_trials"] == 3
+    assert {k: v["bucket"] for k, v in stats["tasks"].items()} == {
+        "retail/a": "hard", "retail/b": "frontier", "retail/c": "solved"}
+    assert stats["counts"]["all"] == {"hard": 1, "frontier": 1, "solved": 1}
+    assert stats["tasks"]["retail/b"]["p"] == pytest.approx(2 / 3)
+    with pytest.raises(ValueError, match="unequal"):
+        frontier.split(rows[:-1])
