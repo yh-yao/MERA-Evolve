@@ -93,8 +93,49 @@ stop_port() {
   kill -9 "$pid" 2>/dev/null || true; sleep 5
 }
 
+# VERL exports Qwen3.5 adapters with text-only keys (model.layers.N...).
+# vLLM >= 0.29 loads Qwen3.5 as Qwen3_5ForConditionalGeneration and only
+# matches model.language_model.layers.N...; unmatched LoRA weights are
+# skipped silently, so the "adapter" server answers exactly like the base
+# (verified 2026-10-25: a 1e4-amplified adapter left greedy logprobs
+# bit-identical). Serve a key-converted copy instead.
+served_adapter() {
+  local src="$1" dst
+  dst="$RESULTS_DIR/served_adapters/$(echo "$(realpath "$src")" | md5sum | cut -c1-12)"
+  if [[ ! -s "$dst/adapter_model.safetensors" ]]; then
+    PYTHONPATH="$ROOT:${PYTHONPATH:-}" "${TRAIN_PY:-$ROOT/.venv_qwen35/bin/python}" -m verl_code_rl.prepare_qwen35_training_adapter \
+      --input "$src" --output "$dst" >&2
+    echo "$(realpath "$src")" > "$dst/SOURCE_ADAPTER"
+  fi
+  echo "$dst"
+}
+
+# Refuse to evaluate an adapter server that behaves exactly like the base.
+assert_adapter_active() {
+  local port="$1" adapter_dir="$2"
+  "${TRAIN_PY:-$ROOT/.venv_qwen35/bin/python}" - "$port" "$adapter_dir" <<'PY' | tee -a "$LOG"
+import json, sys, urllib.request
+from safetensors import safe_open
+port, adapter = sys.argv[1], sys.argv[2]
+with safe_open(adapter + "/adapter_model.safetensors", "pt") as f:
+    b_norm = max(float(f.get_tensor(k).abs().max()) for k in f.keys() if "lora_B" in k)
+def lp(model):
+    body = {"model": model, "prompt": "Customer: I need to change my flight to tomorrow. Agent:",
+            "max_tokens": 1, "temperature": 0, "prompt_logprobs": 0}
+    req = urllib.request.Request(f"http://127.0.0.1:{port}/v1/completions", json.dumps(body).encode(),
+                                 {"Content-Type": "application/json"})
+    rows = json.load(urllib.request.urlopen(req, timeout=120))["choices"][0]["prompt_logprobs"]
+    return [next(iter(r.values()))["logprob"] for r in rows[1:]]
+delta = max(abs(a - b) for a, b in zip(lp("evol-llm-agent"), lp("evol-llm-agent-base")))
+print(f"[adapter-check] max |lora_B|={b_norm:.3g} max |dlogprob| vs base={delta:.3g}")
+if b_norm > 1e-6 and delta == 0.0:
+    sys.exit("FATAL: adapter is not applied by the server (logprobs identical to base)")
+PY
+}
+
 serve() {
   local name="$1" model="$2" gpu="$3" port="$4" adapter="${5:-}"
+  [[ -n "$adapter" ]] && adapter="$(served_adapter "$adapter")"
   local served=(--served-model-name "$name")
   if [[ -n "$adapter" ]]; then
     [[ -s "$adapter/adapter_model.safetensors" ]] || { log "FATAL: no adapter at $adapter"; exit 1; }
@@ -111,7 +152,7 @@ serve() {
     log "$name on :$port serves different weights; restarting it"
     stop_port "$port"
   fi
-  log "starting $name ($model) on GPU $gpu port $port"
+  log "starting $name ($model${adapter:+ + adapter $adapter}) on GPU $gpu port $port"
   # setsid: the servers get their own process group, so a timeout or hangup
   # delivered to this script's group does not take them down mid-run.
   CUDA_VISIBLE_DEVICES="$gpu" VLLM_USE_FLASHINFER_SAMPLER=0 \
@@ -124,7 +165,11 @@ serve() {
       > "$RESULTS_DIR/${name}_server.log" 2>&1 < /dev/null &
   echo $! > "$RESULTS_DIR/${name}_server.pid"
   for _ in $(seq 1 120); do
-    curl -sf "http://127.0.0.1:$port/v1/models" 2>/dev/null | grep -q "\"$name\"" && { log "$name ready"; return 0; }
+    if curl -sf "http://127.0.0.1:$port/v1/models" 2>/dev/null | grep -q "\"$name\""; then
+      log "$name ready"
+      [[ -n "$adapter" ]] && assert_adapter_active "$port" "$adapter"
+      return 0
+    fi
     kill -0 "$(cat "$RESULTS_DIR/${name}_server.pid")" 2>/dev/null || { tail -40 "$RESULTS_DIR/${name}_server.log" >&2; exit 1; }
     sleep 5
   done
