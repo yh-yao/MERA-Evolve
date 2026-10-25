@@ -95,9 +95,9 @@ TRAIN_TRACES="$RESULTS_DIR/train_traces_base.jsonl"
 PARQUET="$RESULTS_DIR/grpo_train.parquet"
 if [[ ! -s "$PARQUET" ]]; then
   log "collecting TRAIN prompts with the base student"
-  "$TAU2_PY" -m tau2_evolve.collect_traces --bucket TRAIN --workers "${WORKERS:-64}" --max-steps 40 --resume \
-    --agent-model openai/evol-llm-agent --agent-base-url "http://127.0.0.1:$AGENT_PORT/v1" \
-    --user-model openai/evol-llm-user --user-base-url "http://127.0.0.1:$USER_PORT/v1" \
+  SERVERS_DIR="$RESULTS_DIR/servers" AGENT_PORT="$AGENT_PORT" USER_PORT="$USER_PORT" \
+    bash "$SCRIPT_DIR/scripts/chunked_collect.sh" --bucket TRAIN --workers "${WORKERS:-64}" --max-steps 40 \
+    --agent-model openai/evol-llm-agent --user-model openai/evol-llm-user \
     --agent-max-tokens 1024 --no-agent-thinking --no-user-thinking --out "$TRAIN_TRACES" >> "$LOG" 2>&1
   "$TRAIN_VENV/bin/python" -m tau2_evolve.prepare_grpo_data --traces "$TRAIN_TRACES" --output "$PARQUET" \
     --user-base-url "http://127.0.0.1:$USER_PORT/v1" --no-user-thinking >> "$LOG" 2>&1

@@ -90,6 +90,18 @@ def main() -> int:
     ap.add_argument("--max-errors", type=int, default=10)
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument(
+        "--max-jobs", type=int, default=0,
+        help="Run at most this many (task, trial) jobs, then exit; with --resume, repeated "
+             "calls work through the remainder. Lets a caller restart long-lived vLLM "
+             "servers between chunks (Qwen3.5 GDN servers stall after many hours).",
+    )
+    ap.add_argument(
+        "--request-timeout", type=float, default=None,
+        help="Per-request timeout in seconds for agent/user endpoints. A hung request "
+             "then becomes an errored row that --resume retries, instead of blocking a "
+             "worker forever.",
+    )
+    ap.add_argument(
         "--resume", action="store_true",
         help="Append to an existing output and skip task IDs already present.",
     )
@@ -157,6 +169,9 @@ def main() -> int:
         for domain, task_id in tasks
         if (domain, str(task_id), trial) not in completed
     ]
+    pending_total = len(jobs)
+    if args.max_jobs > 0:
+        jobs = jobs[: args.max_jobs]
 
     skillbook: dict[str, str] = {}
     if args.skillbook:
@@ -174,6 +189,7 @@ def main() -> int:
             enable_thinking=args.agent_thinking,
             max_tokens=args.agent_max_tokens,
             seed=seed,
+            timeout=args.request_timeout,
         )
         user = benchmark.make_llm_spec(
             args.user_model,
@@ -183,6 +199,7 @@ def main() -> int:
             enable_thinking=args.user_thinking,
             max_tokens=args.user_max_tokens,
             seed=seed,
+            timeout=args.request_timeout,
         )
         return agent, user
 
@@ -220,7 +237,7 @@ def main() -> int:
 
     print(
         f"[collect] bucket={args.bucket} n_tasks={total_tasks} trials={args.trials} "
-        f"remaining={len(jobs)} "
+        f"remaining={pending_total} this_chunk={len(jobs)} "
         f"skillbook={'yes' if skillbook else 'no'} probe_only={args.probe_only}",
         file=sys.stderr,
     )

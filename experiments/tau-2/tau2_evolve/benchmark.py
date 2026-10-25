@@ -238,6 +238,7 @@ def make_llm_spec(
     enable_thinking: bool | None = None,
     max_tokens: int | None = None,
     seed: int | None = None,
+    timeout: float | None = None,
 ):
     from core.schemas.artifacts import LLMSpec
 
@@ -255,6 +256,9 @@ def make_llm_spec(
         args["seed"] = seed
     if max_tokens is not None:
         args["max_tokens"] = max_tokens
+    if timeout is not None:
+        # litellm per-request timeout; raises instead of hanging on a stuck server.
+        args["timeout"] = timeout
     if enable_thinking is not None:
         args["extra_body"] = {
             "chat_template_kwargs": {"enable_thinking": enable_thinking}

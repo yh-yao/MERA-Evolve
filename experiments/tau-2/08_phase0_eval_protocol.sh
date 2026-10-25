@@ -42,6 +42,11 @@ MAX_STEPS="${MAX_STEPS:-60}"
 AGENT_MAX_TOKENS="${AGENT_MAX_TOKENS:-1024}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-40960}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.85}"
+# chunked_collect.sh restarts servers by re-invoking this script, so every
+# server setting -- above all AGENT_ADAPTER -- must survive into that call;
+# otherwise a restart would silently swap the adapter for the base model.
+export BASE_MODEL USER_MODEL_PATH AGENT_GPU AGENT_PORT USER_GPU USER_PORT AGENT_ADAPTER \
+  VLLM_BIN MAX_MODEL_LEN GPU_MEMORY_UTILIZATION
 export TAU2_PARTITION_PATH="${TAU2_PARTITION_PATH:-$SCRIPT_DIR/data/partition_v2.json}"
 export TAU2_WORKSPACE
 export PYTHONPATH="$SCRIPT_DIR:$SCRIPT_DIR/compat:${PYTHONPATH:-}"
@@ -62,6 +67,32 @@ json.dump({k: v for k, v in {
 }.items()}, open(sys.argv[1], "w"), indent=2)
 PY
 
+serving_matches() {
+  # True when /v1/models lists $name backed by $adapter (LoRA) or by $model
+  # with no adapter.
+  curl -sf "http://127.0.0.1:$1/v1/models" | "$TAU2_PY" -c '
+import json, os, sys
+name, model, adapter = sys.argv[1:4]
+real = os.path.realpath
+for m in json.load(sys.stdin)["data"]:
+    if m["id"] != name:
+        continue
+    if adapter:
+        sys.exit(0 if real(m.get("root") or "") == real(adapter) else 1)
+    sys.exit(0 if m.get("parent") is None and real(m.get("root") or "") == real(model) else 1)
+sys.exit(1)' "$2" "$3" "$4"
+}
+
+stop_port() {
+  local pid
+  pid="$(ss -ltnpH "sport = :$1" 2>/dev/null | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)"
+  [[ -n "$pid" ]] || return 0
+  tr '\0' ' ' < "/proc/$pid/cmdline" | grep -qE -- '--served-model-name evol-llm-(agent|user)' \
+    || { log "FATAL: port $1 is held by a process that is not ours"; exit 1; }
+  kill "$pid"; for _ in $(seq 1 90); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
+  kill -9 "$pid" 2>/dev/null || true; sleep 5
+}
+
 serve() {
   local name="$1" model="$2" gpu="$3" port="$4" adapter="${5:-}"
   local served=(--served-model-name "$name")
@@ -72,7 +103,13 @@ serve() {
             --lora-modules "$name=$adapter")
   fi
   if curl -sf "http://127.0.0.1:$port/v1/models" 2>/dev/null | grep -q "\"$name\""; then
-    log "$name already serving on :$port"; return 0
+    # A server under the right name may still hold the wrong weights (base
+    # vs. adapter); evaluating it would silently measure the wrong model.
+    if serving_matches "$port" "$name" "$model" "$adapter"; then
+      log "$name already serving on :$port"; return 0
+    fi
+    log "$name on :$port serves different weights; restarting it"
+    stop_port "$port"
   fi
   log "starting $name ($model) on GPU $gpu port $port"
   # setsid: the servers get their own process group, so a timeout or hangup
@@ -101,25 +138,22 @@ for bucket in $BUCKETS; do
   for seed in $RUN_SEEDS; do
     out="$RESULTS_DIR/${RUN_LABEL}_${bucket}_seed${seed}.jsonl"
     log "collect bucket=$bucket seed=$seed trials=$TRIALS -> $out"
-    # Errored rows are infrastructure failures; --resume retries them.
-    for attempt in 1 2 3; do
-      "$TAU2_PY" -m tau2_evolve.collect_traces \
-        --bucket "$bucket" --trials "$TRIALS" --seed "$seed" \
-        --user-temperature "$USER_TEMPERATURE" --agent-temperature 0.0 \
-        --workers "$WORKERS" --max-steps "$MAX_STEPS" --resume \
-        --agent-model openai/evol-llm-agent --agent-base-url "http://127.0.0.1:$AGENT_PORT/v1" \
-        --user-model openai/evol-llm-user --user-base-url "http://127.0.0.1:$USER_PORT/v1" \
-        --agent-max-tokens "$AGENT_MAX_TOKENS" --no-agent-thinking --no-user-thinking \
-        --out "$out" >> "$LOG" 2>&1
-      # Check the row-level field; message text often contains "error".
-      "$TAU2_PY" -c 'import json,sys; sys.exit(any(json.loads(l).get("error") for l in open(sys.argv[1]) if l.strip()))' "$out" && break
-      log "errored rows remain after attempt $attempt; retrying"
-    done
+    # Chunked so student/user servers restart between chunks (Qwen3.5 GDN
+    # servers stall after hours); errored rows are retried by --resume.
+    SERVERS_DIR="$RESULTS_DIR" bash "$SCRIPT_DIR/scripts/chunked_collect.sh" \
+      --bucket "$bucket" --trials "$TRIALS" --seed "$seed" \
+      --user-temperature "$USER_TEMPERATURE" --agent-temperature 0.0 \
+      --workers "$WORKERS" --max-steps "$MAX_STEPS" \
+      --agent-model openai/evol-llm-agent --user-model openai/evol-llm-user \
+      --agent-max-tokens "$AGENT_MAX_TOKENS" --no-agent-thinking --no-user-thinking \
+      --out "$out" >> "$LOG" 2>&1
   done
-  set -- $RUN_SEEDS
-  "$TAU2_PY" -m tau2_evolve.eval_stats summary "$RESULTS_DIR/${RUN_LABEL}_${bucket}_seed$1.jsonl" \
-    "$RESULTS_DIR/${RUN_LABEL}_${bucket}_seed$2.jsonl" | tee -a "$LOG"
-  "$TAU2_PY" -m tau2_evolve.eval_stats repeatability "$RESULTS_DIR/${RUN_LABEL}_${bucket}_seed$1.jsonl" \
-    "$RESULTS_DIR/${RUN_LABEL}_${bucket}_seed$2.jsonl" --json "$RESULTS_DIR/repeatability_${RUN_LABEL}_${bucket}.json" | tee -a "$LOG"
+  runs=()
+  for seed in $RUN_SEEDS; do runs+=("$RESULTS_DIR/${RUN_LABEL}_${bucket}_seed${seed}.jsonl"); done
+  "$TAU2_PY" -m tau2_evolve.eval_stats summary "${runs[@]}" | tee -a "$LOG"
+  if (( ${#runs[@]} == 2 )); then
+    "$TAU2_PY" -m tau2_evolve.eval_stats repeatability "${runs[@]}" \
+      --json "$RESULTS_DIR/repeatability_${RUN_LABEL}_${bucket}.json" | tee -a "$LOG"
+  fi
 done
 log "phase0 done"
