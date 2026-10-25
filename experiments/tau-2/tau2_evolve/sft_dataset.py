@@ -76,3 +76,30 @@ class Qwen35MultiTurnSFTDataset(MultiTurnSFTDataset):
         if assistant_index != len(assistant_trainable):
             raise ValueError("not all assistant turns were found in rendered conversation")
         return input_ids, loss_mask, attention_mask, {}
+
+
+class Qwen35NativeSFTDataset(Qwen35MultiTurnSFTDataset):
+    """Rows from ``error_points_to_sft``: messages and tools as JSON strings.
+
+    Parsing them here (instead of storing nested Parquet structs) keeps each
+    domain's tool schemas exactly as tau2 sends them to the evaluation
+    endpoint, with no null-padded keys from a cross-domain struct union.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        import json
+
+        self.messages = [json.loads(m) if isinstance(m, str) else m for m in self.messages]
+        if self.tools is not None:
+            self.tools = [json.loads(t) if isinstance(t, str) else t for t in self.tools]
+
+    def _build_messages(self, example):
+        # __getitem__ reads messages from the raw dataframe row, not from
+        # self.messages, so decode the JSON string here as well.
+        import json
+
+        raw = example[self.messages_key]
+        if isinstance(raw, str):
+            example = {**example, self.messages_key: json.loads(raw)}
+        return super()._build_messages(example)

@@ -307,6 +307,34 @@ def build_agent_context(
     return _capture_agent_context(orch)
 
 
+class _FirstMessageAgent:
+    """Answer the first agent turn with a fixed message, then delegate."""
+
+    def __init__(self, inner, message):
+        self.inner = inner
+        self.message = message
+        self.used = False
+
+    def __getattr__(self, name: str):
+        return getattr(self.inner, name)
+
+    def generate_next_message(self, message, state):
+        if self.used:
+            return self.inner.generate_next_message(message, state)
+        self.used = True
+        from tau2.data_model.message import MultiToolMessage
+
+        # Keep the agent's own state consistent: record the incoming message
+        # and the injected reply exactly as the inner agent would.
+        if isinstance(message, MultiToolMessage):
+            state.messages.extend(message.tool_messages)
+        else:
+            state.messages.append(message)
+        reply = self.message.model_copy(deep=True)
+        state.messages.append(reply)
+        return reply, state
+
+
 def run_task(
     *,
     domain: str,
@@ -320,6 +348,7 @@ def run_task(
     message_history: list[dict[str, Any]] | None = None,
     router_model_path: str | Path | None = None,
     router_teacher_spec=None,
+    first_agent_message: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run one tau2 task end-to-end; optionally inject skill text into the
     agent's domain policy. Returns a plain-dict trace record (JSON-safe).
@@ -397,6 +426,14 @@ def run_task(
         )
         orch.agent = routed_agent
 
+    if first_agent_message is not None:
+        # Error-point verification: the agent's first reply after the replayed
+        # history is a fixed (teacher) message; later replies come from the
+        # configured agent. tau2 rejects a replayed history that ends in an
+        # unanswered tool call, so the fix is injected as a reply instead.
+        from tau2.data_model.message import AssistantMessage
+
+        orch.agent = _FirstMessageAgent(orch.agent, AssistantMessage.model_validate(first_agent_message))
     sim = orch.run()
     sim.policy = orch.environment.get_policy()
     try:
