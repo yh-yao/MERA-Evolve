@@ -82,7 +82,10 @@ TRAIN_EXTRA_ARGS+=(
 export TOOL_FORMAT="${TOOL_FORMAT:-qwen3_coder}"
 export MAX_TURNS="${MAX_TURNS:-30}"
 export MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-8192}"
-export MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-12288}"
+# 12288 OOMed a 32 GB actor GPU intermittently (fragmentation + 5.5 GB
+# checkpoint-engine buffers on top of ~17 GB allocated); 8192 keeps clipping
+# low (mean response ~5.5k tokens) with a 16k total context.
+export MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-8192}"
 export LORA_TARGET_MODULES="${LORA_TARGET_MODULES:-[q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj]}"
 
 mkdir -p "$RESULTS_DIR"
