@@ -68,13 +68,11 @@ export PPO_MICRO_BATCH_SIZE="${PPO_MICRO_BATCH_SIZE:-1}"
 export MERA_ACTOR_CUDA_ALLOC_CONF="${MERA_ACTOR_CUDA_ALLOC_CONF:-expandable_segments:True}"
 SAVE_EVERY="${SAVE_EVERY:-5}"
 TRAIN_EXTRA_ARGS=(actor_rollout_ref.model.use_fused_kernels="${USE_FUSED_KERNELS:-True}")
-# Native-protocol rollouts reach ~20k tokens; on a 32 GB card the actor OOMed
-# in update_actor at step 26 (24.9 GB used + 5.5 GB checkpoint-engine
-# buffers). With LoRA only adapters train, so keep the FSDP master params and
-# optimizer state on the CPU. Memory placement only; the algorithm is unchanged.
+# FSDP CPU offload made 32 GB actor GPUs OOM *earlier* (compute_log_prob,
+# step 2 at a 16k context), so it is off by default.
 TRAIN_EXTRA_ARGS+=(
-  actor_rollout_ref.actor.fsdp_config.param_offload="${ACTOR_PARAM_OFFLOAD:-True}"
-  actor_rollout_ref.actor.fsdp_config.optimizer_offload="${ACTOR_OPTIMIZER_OFFLOAD:-True}"
+  actor_rollout_ref.actor.fsdp_config.param_offload="${ACTOR_PARAM_OFFLOAD:-False}"
+  actor_rollout_ref.actor.fsdp_config.optimizer_offload="${ACTOR_OPTIMIZER_OFFLOAD:-False}"
 )
 # Native Qwen3.5 protocol (tau2_evolve.native_chat): XML tool calls, tools
 # rendered by the chat template, and horizons long enough for a tau2 task
