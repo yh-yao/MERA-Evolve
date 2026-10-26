@@ -7,6 +7,10 @@
 #   C  distillation only            reverse-KL to the teacher, no task reward
 #   D  GRPO + distillation (main)   reward as B, plus reverse-KL to the teacher
 #   E  D without shaping            official reward only from step 0
+#   F  error-point correction SFT   only the teacher's verified fix at the
+#                                   student's first wrong turn is trained
+#                                   (CORRECTIONS_PARQUET, error_points_to_sft)
+#   G  F, then GRPO as B            from F's adapter
 #
 # B vs D isolates the teacher signal, D vs E isolates action-recall shaping.
 # Every group trains from the base student on the same TRAIN parquet with the
@@ -15,7 +19,8 @@
 #
 # Required:
 #   RESULTS_DIR          absolute, one per configuration (immutable evidence)
-#   PHASE1_GROUPS        subset of "A B C D E" (default: B C D E)
+#   PHASE1_GROUPS        subset of "A B C D E F G" (default: B C D E)
+#   CORRECTIONS_PARQUET  groups F/G: output of tau2_evolve.error_points_to_sft
 #   TRAIN_GPU ROLLOUT_GPU AGENT_GPU USER_GPU
 #   MERA_TEACHER_BASE_URL  external teacher /v1 (needed by A, C, D, E)
 #   TEACHER_MODEL_PATH     teacher weights (tokenizer check)
@@ -161,6 +166,28 @@ train_group_A() {
   run_rl "$out" A "$(group_env B) LORA_ADAPTER_PATH=$sft_adapter"
 }
 
+# F/G: SFT on error-point corrections. Rows carry the student's own context
+# and one trainable turn (the verified teacher fix); see collect_error_points.
+train_correction_sft() {
+  local adapter="$1" log_file="$2"
+  : "${CORRECTIONS_PARQUET:?groups F and G need CORRECTIONS_PARQUET}"
+  [[ -s "$adapter/adapter_model.safetensors" ]] && return 0
+  log "correction SFT on $CORRECTIONS_PARQUET -> $adapter"
+  ( cd "$ROOT" && source "$TRAIN_VENV/bin/activate" && \
+    env CUDA_VISIBLE_DEVICES="$TRAIN_GPU" PYTHON="$TRAIN_VENV/bin/python" \
+      SFT_DATA="$CORRECTIONS_PARQUET" SFT_OUTPUT_DIR="$adapter" MODEL_PATH="$BASE_MODEL" \
+      SFT_BATCH_SIZE="${CORR_SFT_BATCH_SIZE:-8}" SFT_MICRO_BATCH_SIZE_PER_GPU=1 \
+      SFT_LR="${CORR_SFT_LR:-1e-5}" SFT_TOTAL_EPOCHS="${CORR_SFT_EPOCHS:-2}" \
+      SFT_MAX_LENGTH="${SFT_MAX_LENGTH:-24576}" SFT_MAX_TOKEN_LEN_PER_GPU="${SFT_MAX_LENGTH:-24576}" \
+      QWEN35_ENABLE_VERL_PATCHES=1 QWEN35_TRAIN_TRITON_OVERLAY="$ROOT/.deps/qwen35-triton33" FLA_TILELANG=0 \
+      SFT_ENABLE_THINKING=False SFT_ATTN_IMPLEMENTATION=sdpa SFT_USE_TORCH_COMPILE=False \
+      SFT_DATASET_PATH="$SCRIPT_DIR/tau2_evolve/sft_dataset.py" SFT_DATASET_NAME=Qwen35NativeSFTDataset \
+      SFT_SAVE_FREQ=-1 SFT_PROJECT_NAME=tau2_phase1 SFT_EXPERIMENT_NAME=correction_sft \
+      bash scripts/train_sft.sh data.num_workers=0 \
+        model.use_remove_padding=True model.use_fused_kernels="${USE_FUSED_KERNELS:-True}" \
+        model.enable_gradient_checkpointing=True ) > "$log_file" 2>&1
+}
+
 # One RL training run with a single resume retry: VERL restarts from the
 # latest SAVE_EVERY checkpoint under OUTPUT_DIR.
 run_rl() {
@@ -197,6 +224,19 @@ for group in $PHASE1_GROUPS; do
   if [[ ! -s "$out/verl/final_adapter_path.txt" ]]; then
     if [[ "$group" == "A" ]]; then
       train_group_A "$out" || { log "group A: training FAILED (see $out/*.log)"; continue; }
+    elif [[ "$group" == "F" ]]; then
+      train_correction_sft "$out/sft_adapter" "$out/sft.log" \
+        || { log "group F: SFT FAILED (see $out/sft.log)"; continue; }
+      mkdir -p "$out/verl"; echo "$out/sft_adapter" > "$out/verl/final_adapter_path.txt"
+    elif [[ "$group" == "G" ]]; then
+      # Reuse F's adapter when F ran in this RESULTS_DIR (same data, same seed).
+      sft="$RESULTS_DIR/group_F/sft_adapter"
+      [[ -s "$sft/adapter_model.safetensors" ]] || sft="$out/sft_adapter"
+      train_correction_sft "$sft" "$out/sft.log" \
+        || { log "group G: SFT FAILED (see $out/sft.log)"; continue; }
+      log "group G: GRPO from $sft"
+      run_rl "$out" G "$(group_env B) LORA_ADAPTER_PATH=$sft" \
+        || { log "group G: training FAILED (see $out/train.log)"; continue; }
     else
       log "group $group: training ($(group_env "$group"))"
       run_rl "$out" "$group" "$(group_env "$group")" \
