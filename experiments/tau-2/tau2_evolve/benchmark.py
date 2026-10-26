@@ -330,7 +330,12 @@ class _FirstMessageAgent:
             state.messages.extend(message.tool_messages)
         else:
             state.messages.append(message)
-        reply = self.message.model_copy(deep=True)
+        from tau2.utils.utils import get_now
+
+        # tau2 sorts the trajectory by timestamp; a stale timestamp from when
+        # the teacher produced this message would misplace it (and its tool
+        # results) and fail evaluation with "Tool message expected".
+        reply = self.message.model_copy(deep=True, update={"timestamp": get_now(), "turn_idx": None})
         state.messages.append(reply)
         return reply, state
 

@@ -99,6 +99,7 @@ def build_agent(domain: str, task_id: str, agent_spec, user_spec, seed: int):
 def divergence_points(row: dict, teacher_spec, user_spec, seed: int, max_turns: int, max_points: int):
     """Assistant turns where the teacher would act differently, in order."""
     from pydantic import TypeAdapter
+    from tau2.agent.base_agent import is_valid_agent_history_message
     from tau2.data_model.message import AssistantMessage, Message
 
     msgs = TypeAdapter(list[Message]).validate_python(row["messages"])
@@ -112,7 +113,9 @@ def divergence_points(row: dict, teacher_spec, user_spec, seed: int, max_turns: 
         checked += 1
         if checked > max_turns:
             break
-        prior, incoming = _agent_turn_inputs(msgs[:t])
+        # The agent never sees the user's own tool calls (telecom); filter
+        # them exactly as the orchestrator does when it seeds agent state.
+        prior, incoming = _agent_turn_inputs([m for m in msgs[:t] if is_valid_agent_history_message(m)])
         state = teacher.get_init_state(message_history=prior)
         reply, _ = teacher.generate_next_message(incoming, state)
         student_d = msg.model_dump(mode="json")
