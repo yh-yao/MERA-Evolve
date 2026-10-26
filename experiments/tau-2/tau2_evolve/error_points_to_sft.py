@@ -25,8 +25,16 @@ from pathlib import Path
 from tau2_evolve import native_chat
 
 
+def agent_visible(messages: list[dict]) -> list[dict]:
+    """Drop what the agent never sees (telecom user tool calls and their results),
+    mirroring tau2's ``is_valid_agent_history_message``."""
+    return [m for m in messages
+            if not (m.get("role") == "user" and m.get("tool_calls"))
+            and not (m.get("role") == "tool" and m.get("requestor") == "user")]
+
+
 def sft_row(rec: dict, teacher_message: dict | None = None) -> dict:
-    context = native_chat.litellm_messages(rec["context_messages"], rec["system_prompt"])
+    context = native_chat.litellm_messages(agent_visible(rec["context_messages"]), rec["system_prompt"])
     target = native_chat.litellm_messages([teacher_message or rec["teacher_message"]])[0]
     messages = [{**m, "_trainable": False} if m["role"] == "assistant" else m for m in context]
     messages.append({**target, "_trainable": True})
@@ -48,7 +56,7 @@ def rehearsal_row(trace: dict) -> dict:
     repeated tool calls at lr 1e-5).
     """
     messages = [{**m, "_trainable": True} if m["role"] == "assistant" else m
-                for m in native_chat.litellm_messages(trace["messages"], trace["system_prompt"])]
+                for m in native_chat.litellm_messages(agent_visible(trace["messages"]), trace["system_prompt"])]
     return {
         "messages": json.dumps(native_chat.template_messages(messages), ensure_ascii=False),
         "tools": json.dumps(trace["tools"], ensure_ascii=False),
@@ -69,6 +77,11 @@ def main() -> int:
     ap.add_argument("--rehearsal-traces", type=Path, action="append", default=[],
                     help="student traces; passed ones become whole-trajectory rows")
     ap.add_argument("--rehearsal-per-task", type=int, default=1)
+    ap.add_argument(
+        "--correction-repeat", type=int, default=1,
+        help="repeat each correction row; a correction trains ~60 tokens while a rehearsal "
+             "trajectory trains thousands, so without repeats corrections are ~3%% of the loss",
+    )
     args = ap.parse_args()
     import pandas as pd
 
@@ -88,9 +101,10 @@ def main() -> int:
                 skipped["duplicate"] += 1
                 continue
             seen.add(key)
-            rows.append(sft_row(rec))
+            fixes = [sft_row(rec)]
             if not args.no_variants:
-                rows.extend(sft_row(rec, v) for v in rec.get("teacher_variants") or [])
+                fixes += [sft_row(rec, v) for v in rec.get("teacher_variants") or []]
+            rows.extend(fixes * args.correction_repeat)
     per_task = Counter()
     for path in args.rehearsal_traces:
         for line in path.read_text().splitlines():
