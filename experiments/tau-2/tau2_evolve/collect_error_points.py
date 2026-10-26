@@ -96,10 +96,42 @@ def build_agent(domain: str, task_id: str, agent_spec, user_spec, seed: int):
     return build_text_orchestrator(cfg, task, seed=seed).agent
 
 
+def agent_reply(agent, history) -> dict:
+    """The agent's next message after ``history`` (tau2 messages), as JSON."""
+    from tau2.agent.base_agent import is_valid_agent_history_message
+
+    # The agent never sees the user's own tool calls (telecom); filter them
+    # exactly as the orchestrator does when it seeds agent state.
+    prior, incoming = _agent_turn_inputs([m for m in history if is_valid_agent_history_message(m)])
+    reply, _ = agent.generate_next_message(incoming, agent.get_init_state(message_history=prior))
+    return reply.model_dump(mode="json")
+
+
+def teacher_variants(row: dict, point: dict, spec, user_spec, seed: int, n: int) -> list[dict]:
+    """Sampled rewordings of the verified fix: same action, different text.
+
+    Only samples whose action signature equals the verified teacher message
+    are kept, so every variant takes the action that was verified.
+    """
+    from pydantic import TypeAdapter
+    from tau2.data_model.message import Message
+
+    history = TypeAdapter(list[Message]).validate_python(row["messages"][: point["turn_index"]])
+    want = action_signature(point["teacher_message"])
+    out, seen = [], {json.dumps(point["teacher_message"].get("content"))}
+    for i in range(n):
+        agent = build_agent(row["domain"], str(row["task_id"]), spec, user_spec, seed + 1 + i)
+        msg = agent_reply(agent, history)
+        key = json.dumps(msg.get("content"))
+        if action_signature(msg) == want and key not in seen:
+            seen.add(key)
+            out.append(msg)
+    return out
+
+
 def divergence_points(row: dict, teacher_spec, user_spec, seed: int, max_turns: int, max_points: int):
     """Assistant turns where the teacher would act differently, in order."""
     from pydantic import TypeAdapter
-    from tau2.agent.base_agent import is_valid_agent_history_message
     from tau2.data_model.message import AssistantMessage, Message
 
     msgs = TypeAdapter(list[Message]).validate_python(row["messages"])
@@ -113,13 +145,8 @@ def divergence_points(row: dict, teacher_spec, user_spec, seed: int, max_turns: 
         checked += 1
         if checked > max_turns:
             break
-        # The agent never sees the user's own tool calls (telecom); filter
-        # them exactly as the orchestrator does when it seeds agent state.
-        prior, incoming = _agent_turn_inputs([m for m in msgs[:t] if is_valid_agent_history_message(m)])
-        state = teacher.get_init_state(message_history=prior)
-        reply, _ = teacher.generate_next_message(incoming, state)
         student_d = msg.model_dump(mode="json")
-        teacher_d = reply.model_dump(mode="json")
+        teacher_d = agent_reply(teacher, msgs[:t])
         kind = divergence_kind(student_d, teacher_d)
         if kind:
             points.append({"turn_index": t, "kind": kind, "turns_checked": checked,
@@ -158,6 +185,9 @@ def main() -> int:
              "(early divergences are often a different but valid ordering, not the error)",
     )
     ap.add_argument("--max-steps", type=int, default=60)
+    ap.add_argument("--teacher-variants", type=int, default=0,
+                    help="extra teacher samples per verified fix; those with the same action are kept")
+    ap.add_argument("--variant-temperature", type=float, default=0.8)
     ap.add_argument("--seed", type=int, default=300)
     ap.add_argument("--workers", type=int, default=24)
     ap.add_argument("--request-timeout", type=float, default=900)
@@ -173,6 +203,9 @@ def main() -> int:
                                       enable_thinking=False, max_tokens=1024, timeout=args.request_timeout)
     student = benchmark.make_llm_spec(args.student_model, args.student_base_url, temperature=0.0,
                                       enable_thinking=False, max_tokens=1024, timeout=args.request_timeout)
+    teacher_sampler = benchmark.make_llm_spec(args.teacher_model, args.teacher_base_url,
+                                              temperature=args.variant_temperature, enable_thinking=False,
+                                              max_tokens=1024, timeout=args.request_timeout)
     user = benchmark.make_llm_spec(args.user_model, args.user_base_url, temperature=0.0,
                                    enable_thinking=False, timeout=args.request_timeout)
     benchmark.prime_nl_judge_routing(user)
@@ -213,6 +246,9 @@ def main() -> int:
                 base.update({k: point[k] for k in ("turn_index", "kind", "student_message", "teacher_message")})
                 base["context_messages"] = row["messages"][: point["turn_index"]]
                 base["verified_by"] = verified
+                if args.teacher_variants:
+                    base["teacher_variants"] = teacher_variants(row, point, teacher_sampler, user, args.seed,
+                                                                args.teacher_variants)
                 break
         return base
 

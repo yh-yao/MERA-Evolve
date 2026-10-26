@@ -25,9 +25,9 @@ from pathlib import Path
 from tau2_evolve import native_chat
 
 
-def sft_row(rec: dict) -> dict:
+def sft_row(rec: dict, teacher_message: dict | None = None) -> dict:
     context = native_chat.litellm_messages(rec["context_messages"], rec["system_prompt"])
-    target = native_chat.litellm_messages([rec["teacher_message"]])[0]
+    target = native_chat.litellm_messages([teacher_message or rec["teacher_message"]])[0]
     messages = [{**m, "_trainable": False} if m["role"] == "assistant" else m for m in context]
     messages.append({**target, "_trainable": True})
     return {
@@ -40,12 +40,35 @@ def sft_row(rec: dict) -> dict:
     }
 
 
+def rehearsal_row(trace: dict) -> dict:
+    """A passed student trajectory with every assistant turn trainable.
+
+    Mixed in with the corrections so the update keeps the student's own
+    successful behaviour (single-turn corrections alone collapsed it into
+    repeated tool calls at lr 1e-5).
+    """
+    messages = [{**m, "_trainable": True} if m["role"] == "assistant" else m
+                for m in native_chat.litellm_messages(trace["messages"], trace["system_prompt"])]
+    return {
+        "messages": json.dumps(native_chat.template_messages(messages), ensure_ascii=False),
+        "tools": json.dumps(trace["tools"], ensure_ascii=False),
+        "domain": trace["domain"],
+        "task_id": str(trace["task_id"]),
+        "error_kind": "rehearsal",
+        "verified_by": "rehearsal",
+    }
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--error-points", type=Path, action="append", required=True)
     ap.add_argument("--output", type=Path, required=True)
     ap.add_argument("--verified-by", nargs="+", default=["student", "teacher"],
                     help="which verification outcomes to keep")
+    ap.add_argument("--no-variants", action="store_true", help="ignore sampled teacher_variants")
+    ap.add_argument("--rehearsal-traces", type=Path, action="append", default=[],
+                    help="student traces; passed ones become whole-trajectory rows")
+    ap.add_argument("--rehearsal-per-task", type=int, default=1)
     args = ap.parse_args()
     import pandas as pd
 
@@ -66,6 +89,19 @@ def main() -> int:
                 continue
             seen.add(key)
             rows.append(sft_row(rec))
+            if not args.no_variants:
+                rows.extend(sft_row(rec, v) for v in rec.get("teacher_variants") or [])
+    per_task = Counter()
+    for path in args.rehearsal_traces:
+        for line in path.read_text().splitlines():
+            trace = json.loads(line)
+            if trace.get("error") or not trace.get("passed") or not trace.get("messages"):
+                continue
+            key = (trace["domain"], str(trace["task_id"]))
+            if per_task[key] >= args.rehearsal_per_task:
+                continue
+            per_task[key] += 1
+            rows.append(rehearsal_row(trace))
     args.output.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(rows).to_parquet(args.output)
     print(json.dumps({"rows": len(rows), "skipped": dict(skipped),
