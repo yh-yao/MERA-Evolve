@@ -354,6 +354,7 @@ def run_task(
     router_model_path: str | Path | None = None,
     router_teacher_spec=None,
     first_agent_message: dict[str, Any] | None = None,
+    turn_router=None,
 ) -> dict[str, Any]:
     """Run one tau2 task end-to-end; optionally inject skill text into the
     agent's domain policy. Returns a plain-dict trace record (JSON-safe).
@@ -431,6 +432,25 @@ def run_task(
         )
         orch.agent = routed_agent
 
+    turn_routed = None
+    if turn_router is not None:
+        from tau2_evolve.turn_router import TurnRoutedAgent
+
+        def _side_agent(spec):
+            if spec is None:
+                return None
+            cfg = text_cfg.model_copy(update={"llm_agent": spec.model, "llm_args_agent": dict(spec.args)})
+            agent = build_text_orchestrator(cfg, task_obj, seed=config.seed).agent
+            if skill_text:
+                agent.domain_policy = f"{agent.domain_policy}\n\n{skill_text}"
+            return agent
+
+        turn_routed = TurnRoutedAgent(
+            orch.agent, _side_agent(turn_router.teacher_spec), _side_agent(turn_router.sampler_spec),
+            turn_router, rng_key=f"{domain}/{task_id}/{seed}",
+        )
+        orch.agent = turn_routed
+
     if first_agent_message is not None:
         # Error-point verification: the agent's first reply after the replayed
         # history is a fixed (teacher) message; later replies come from the
@@ -483,4 +503,5 @@ def run_task(
         "router_used": routed_agent is not None,
         "router_escalations": routed_agent.escalations if routed_agent else 0,
         "router_max_probability": max(routed_agent.route_probabilities, default=0.0) if routed_agent else 0.0,
+        **({"turn_router": turn_routed.summary()} if turn_routed is not None else {}),
     }

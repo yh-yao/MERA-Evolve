@@ -120,6 +120,15 @@ def main() -> int:
         default=os.environ.get("OPD_TEACHER_API_KEY", "EMPTY"),
     )
     ap.add_argument("--router-teacher-max-tokens", type=int, default=1024)
+    ap.add_argument(
+        "--turn-router", default=None,
+        help="per-turn escalation policy (tau2_evolve.turn_router): never | always | random:P | "
+             "tool_error | disagree:T | oracle",
+    )
+    ap.add_argument("--turn-router-teacher-model", default="openai/evol-llm-teacher")
+    ap.add_argument("--turn-router-teacher-base-url")
+    ap.add_argument("--disagree-k", type=int, default=0,
+                    help="student samples per turn for the disagree policy (or for logging with never)")
     ap.add_argument("--out", type=Path, required=True)
     args = ap.parse_args()
     if args.fallback_attempts < 1:
@@ -224,6 +233,26 @@ def main() -> int:
             enable_thinking=args.user_thinking,
             max_tokens=args.user_max_tokens,
         )
+    turn_router = None
+    if args.turn_router:
+        from tau2_evolve.turn_router import TurnRouterConfig
+
+        probe = TurnRouterConfig.parse(args.turn_router)
+        if probe.needs_teacher and not args.turn_router_teacher_base_url:
+            ap.error("--turn-router needs --turn-router-teacher-base-url")
+        if probe.policy == "disagree" and args.disagree_k < 1:
+            ap.error("--turn-router disagree needs --disagree-k >= 1")
+        teacher = benchmark.make_llm_spec(
+            args.turn_router_teacher_model, args.turn_router_teacher_base_url, temperature=0.0,
+            enable_thinking=args.agent_thinking, max_tokens=args.agent_max_tokens, timeout=args.request_timeout,
+        ) if probe.needs_teacher else None
+        sampler = benchmark.make_llm_spec(
+            args.agent_model, args.agent_base_url, args.agent_api_key, temperature=1.0,
+            enable_thinking=args.agent_thinking, max_tokens=args.agent_max_tokens, timeout=args.request_timeout,
+        ) if args.disagree_k else None
+        turn_router = TurnRouterConfig.parse(args.turn_router, teacher_spec=teacher, sampler_spec=sampler,
+                                             disagree_k=args.disagree_k)
+
     router_teacher_spec = None
     if args.router_model:
         if not args.router_teacher_model or not args.router_teacher_base_url:
@@ -252,6 +281,7 @@ def main() -> int:
             skill_text=skill_text,
             router_model_path=args.router_model,
             router_teacher_spec=router_teacher_spec,
+            turn_router=turn_router,
         )
         main_row["fallback_used"] = False
         main_row["trial"] = trial

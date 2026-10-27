@@ -42,6 +42,8 @@ MAX_STEPS="${MAX_STEPS:-60}"
 AGENT_MAX_TOKENS="${AGENT_MAX_TOKENS:-1024}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-40960}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.85}"
+# Extra collect_traces flags, e.g. a per-turn router:
+#   EXTRA_COLLECT_ARGS="--turn-router oracle --turn-router-teacher-base-url http://HOST:8270/v1"
 # chunked_collect.sh restarts servers by re-invoking this script, so every
 # server setting -- above all AGENT_ADAPTER -- must survive into that call;
 # otherwise a restart would silently swap the adapter for the base model.
@@ -191,7 +193,7 @@ for bucket in $BUCKETS; do
       --workers "$WORKERS" --max-steps "$MAX_STEPS" \
       --agent-model openai/evol-llm-agent --user-model openai/evol-llm-user \
       --agent-max-tokens "$AGENT_MAX_TOKENS" --no-agent-thinking --no-user-thinking \
-      --out "$out" >> "$LOG" 2>&1
+      ${EXTRA_COLLECT_ARGS:-} --out "$out" >> "$LOG" 2>&1
   done
   runs=()
   for seed in $RUN_SEEDS; do runs+=("$RESULTS_DIR/${RUN_LABEL}_${bucket}_seed${seed}.jsonl"); done
