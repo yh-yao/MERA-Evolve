@@ -42,13 +42,15 @@ MAX_STEPS="${MAX_STEPS:-60}"
 AGENT_MAX_TOKENS="${AGENT_MAX_TOKENS:-1024}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-40960}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.85}"
+# Two servers sharing one GPU (e.g. 0.42 each) leave too few Qwen3.5 Mamba
+# cache blocks for vLLM's default 256 sequences; set VLLM_MAX_NUM_SEQS=128.
 # Extra collect_traces flags, e.g. a per-turn router:
 #   EXTRA_COLLECT_ARGS="--turn-router oracle --turn-router-teacher-base-url http://HOST:8270/v1"
 # chunked_collect.sh restarts servers by re-invoking this script, so every
 # server setting -- above all AGENT_ADAPTER -- must survive into that call;
 # otherwise a restart would silently swap the adapter for the base model.
 export BASE_MODEL USER_MODEL_PATH AGENT_GPU AGENT_PORT USER_GPU USER_PORT AGENT_ADAPTER \
-  VLLM_BIN MAX_MODEL_LEN GPU_MEMORY_UTILIZATION
+  VLLM_BIN MAX_MODEL_LEN GPU_MEMORY_UTILIZATION VLLM_MAX_NUM_SEQS
 export TAU2_PARTITION_PATH="${TAU2_PARTITION_PATH:-$SCRIPT_DIR/data/partition_v2.json}"
 export TAU2_WORKSPACE
 export PYTHONPATH="$SCRIPT_DIR:$SCRIPT_DIR/compat:${PYTHONPATH:-}"
@@ -164,6 +166,7 @@ serve() {
       --language-model-only --gdn-prefill-backend "${GDN_PREFILL_BACKEND:-triton}" \
       --default-chat-template-kwargs '{"enable_thinking": false}' \
       --enable-auto-tool-choice --tool-call-parser "${TOOL_CALL_PARSER:-qwen3_xml}" \
+      ${VLLM_MAX_NUM_SEQS:+--max-num-seqs "$VLLM_MAX_NUM_SEQS"} \
       > "$RESULTS_DIR/${name}_server.log" 2>&1 < /dev/null &
   echo $! > "$RESULTS_DIR/${name}_server.pid"
   for _ in $(seq 1 120); do
