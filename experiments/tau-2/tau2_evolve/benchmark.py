@@ -137,6 +137,10 @@ def task_ids_for(bucket: str, domain: str | None = None) -> list[tuple[str, str]
     TRAIN. Not comparable to tau2_stage2's historical telecom numbers, but a
     real, loadable telecom set for our own skills_only/sft_only baselines.
     """
+    if bucket == "AREAL":
+        from tau2_evolve import areal_tasks
+
+        return areal_tasks.task_ids(domain)
     if partition_version() >= 2:
         rows = load_partition()[bucket]
         return [(r["domain"], r["task_id"]) for r in rows if domain is None or r["domain"] == domain]
@@ -218,6 +222,10 @@ def _load_all_tasks(domain: str) -> list[dict[str, Any]]:
 
 
 def load_task(domain: str, task_id: str) -> dict[str, Any]:
+    from tau2_evolve import areal_tasks
+
+    if areal_tasks.is_areal(task_id):
+        return areal_tasks.task_dict(task_id)
     if domain not in _TASKS_CACHE:
         _TASKS_CACHE[domain] = _load_all_tasks(domain)
     return next(t for t in _TASKS_CACHE[domain] if str(t["id"]) == str(task_id))
@@ -340,7 +348,15 @@ class _FirstMessageAgent:
         return reply, state
 
 
-def run_task(
+def run_task(**kwargs) -> dict[str, Any]:
+    """Run one task; AReaL tasks (``areal:<id>``) use their own DB snapshot for run and evaluation."""
+    from tau2_evolve import areal_tasks
+
+    with areal_tasks.use_db(str(kwargs.get("task_id", ""))):
+        return _run_task(**kwargs)
+
+
+def _run_task(
     *,
     domain: str,
     task_id: str,

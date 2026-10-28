@@ -33,9 +33,10 @@ from tau2_evolve import benchmark
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--bucket", default="TRAIN", choices=["TRAIN", "EVAL", "DIAG", "VAL"])
+    ap.add_argument("--bucket", default="TRAIN", choices=["TRAIN", "EVAL", "DIAG", "VAL", "AREAL"])
     ap.add_argument("--domain", default=None, choices=benchmark.DOMAINS)
     ap.add_argument("--limit", type=int, default=-1)
+    ap.add_argument("--shard", default=None, help="i/n: keep every n-th task starting at i (after --limit)")
     ap.add_argument("--agent-model", default="openai/evol-llm-agent")
     ap.add_argument("--agent-base-url", default="http://127.0.0.1:8200/v1")
     ap.add_argument("--agent-api-key", default="EMPTY")
@@ -151,6 +152,9 @@ def main() -> int:
     tasks = benchmark.task_ids_for(args.bucket, args.domain)
     if args.limit >= 0:
         tasks = tasks[: args.limit]
+    if args.shard:
+        index, count = (int(x) for x in args.shard.split("/"))
+        tasks = tasks[index::count]
     total_tasks = len(tasks)
 
     existing_rows: list[dict] = []

@@ -61,7 +61,10 @@ class Tau2Interaction:
             seed=seed, max_steps=max_steps, max_errors=10, num_trials=1,
         )
         benchmark.prime_nl_judge_routing(user_spec)
-        orch = build_text_orchestrator(text_cfg, task, seed=seed, simulation_id=instance_id)
+        from tau2_evolve import areal_tasks
+
+        with areal_tasks.use_db(str(task_id)):  # AReaL tasks bind tools to their own DB snapshot
+            orch = build_text_orchestrator(text_cfg, task, seed=seed, simulation_id=instance_id)
         if skill_text:
             orch.agent.domain_policy = f"{orch.agent.domain_policy}\n\n{skill_text}"
         orch._run_start_time = get_now()
@@ -235,10 +238,13 @@ class Tau2Interaction:
         orch = state["orch"]
         sim = orch._finalize()
         sim.policy = orch.environment.get_policy()
-        info = evaluate_simulation(
-            simulation=sim, task=state["task"], evaluation_type=evaluation_type_for(state["task"]),
-            solo_mode=getattr(orch, "solo_mode", False), domain=orch.domain, mode=communication_mode(),
-        )
+        from tau2_evolve import areal_tasks
+
+        with areal_tasks.use_db(str(state["task"].id)):  # gold replay must use the same DB snapshot
+            info = evaluate_simulation(
+                simulation=sim, task=state["task"], evaluation_type=evaluation_type_for(state["task"]),
+                solo_mode=getattr(orch, "solo_mode", False), domain=orch.domain, mode=communication_mode(),
+            )
         official_reward = float(info.reward)
         _, _, action_recall, _ = benchmark.action_completion(state["task"], sim.messages or [])
         state["score"] = (
