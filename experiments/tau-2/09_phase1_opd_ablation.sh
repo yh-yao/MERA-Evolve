@@ -248,6 +248,7 @@ for group in $PHASE1_GROUPS; do
         || { log "group $group: training FAILED (see $out/train.log)"; continue; }
     fi
   fi
+  [[ -n "${SKIP_EVAL:-}" ]] && { log "group $group: SKIP_EVAL set, not evaluating"; continue; }
   adapter="$(cat "$out/verl/final_adapter_path.txt")"
   log "group $group: evaluating $adapter on VAL"
   # Student restarts with the adapter on the eval port; the user simulator is shared.
