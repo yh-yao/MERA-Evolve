@@ -10,10 +10,14 @@ M=/mnt/data/users/luzheng/agent_rl/models; T=/mnt/data/users/luzheng/agent_rl/tm
 REF=$T/ref4b; EVAL_PORT=8460
 log() { echo "[$(date -u +%FT%TZ)] $*" >> $W/watchdog.log; }
 # name dir user_agent_gpu train_gpu rollout_gpu agent_port user_port
-RUNS="G1:$(ls -d results/r3_G1_20261028_0801* | tail -1):5:6:7:8280:8281 G2:$(ls -d results/r3_G2_20261028_0802* | tail -1):2:3:4:8282:8283"
+# phase 2 (after the lr bump): lr 3e-5 runs continued from each group's step-100 LoRA
+G1OLD=results/r3_G1_20261028_080127; G2OLD=results/r3_G2_20261028_080258
+RUNS="G1:$(ls -d results/r3_G1_lr3e-5_* | tail -1):5:6:7:8280:8281:$G1OLD G2:$(ls -d results/r3_G2_lr3e-5_* | tail -1):2:3:4:8282:8283:$G2OLD"
+EVAL_ONLY="G1lr1e-5:$G1OLD G2lr1e-5:$G2OLD"   # their remaining checkpoints are still evaluated
 alive() { for p in $(pgrep -f "09_phase1_opd_ablation.sh"); do grep -qa "RESULTS_DIR=$PWD/$1" /proc/$p/environ 2>/dev/null && return 0; done; return 1; }
-resume() { # dir ug tg rg ap up
-  env RESULTS_DIR=$PWD/$1 PHASE1_GROUPS=O ACTOR_LR=1e-5 TOTAL_STEPS=250 TRAIN_BATCH_SIZE=4 N_GENERATIONS=8 SAVE_EVERY=50 \
+resume() { # dir ug tg rg ap up src
+  env RESULTS_DIR=$PWD/$1 PHASE1_GROUPS=O ACTOR_LR=3e-5 TOTAL_STEPS=150 TRAIN_BATCH_SIZE=4 N_GENERATIONS=8 SAVE_EVERY=50 \
+    LORA_ADAPTER_PATH=$PWD/$7/r4/step_100/adapter \
     CHECKPOINT_BUCKET_MB=1536 MAX_RESPONSE_LENGTH=6144 SKIP_EVAL=1 \
     EXTRA_TRAIN_ARGS="actor_rollout_ref.actor.fsdp_config.model_dtype=bf16" \
     USER_GPU=$2 AGENT_GPU=$2 TRAIN_GPU=$3 ROLLOUT_GPU=$4 AGENT_PORT=$5 USER_PORT=$6 \
@@ -23,7 +27,10 @@ resume() { # dir ug tg rg ap up
     setsid nohup bash experiments/tau-2/09_phase1_opd_ablation.sh >> $PWD/$1/driver_resume.log 2>&1 < /dev/null &
 }
 free_gpu() { # a GPU with >= 27 GB free (student + user at 0.42 each); never shares with others' jobs below that
-  nvidia-smi --query-gpu=index,memory.free --format=csv,noheader,nounits | awk -F", " '$2 >= 27000 {print $1; exit}'
+  # never a GPU assigned to our own training runs (their servers may still be loading)
+  local busy=" $(for spec in $RUNS; do IFS=: read _ _ a b c _ <<< "$spec"; echo -n "$a $b $c "; done)"
+  nvidia-smi --query-gpu=index,memory.free --format=csv,noheader,nounits | while IFS=", " read i f; do
+    [ "$f" -ge 27000 ] && [[ "$busy" != *" $i "* ]] && { echo $i; break; }; done
 }
 eval_ckpt() { # name dir step gpu (runs in the background eval slot)
   local n=$1 d=$2 s=$3 out=$PWD/$2/r4/step_$3 EVAL_GPU=$4
@@ -57,7 +64,7 @@ log "watchdog start: $RUNS"
 while true; do
   all_done=1
   for spec in $RUNS; do
-    IFS=: read n d ug tg rg ap up <<< "$spec"
+    IFS=: read n d ug tg rg ap up src <<< "$spec"
     v=$PWD/$d/group_O/verl; tl=$PWD/$d/group_O/train.log
     if [ -s $v/final_adapter_path.txt ]; then
       [ -f $W/$n.final ] || { touch $W/$n.final; log "$n finished: $(cat $v/final_adapter_path.txt)"; }
@@ -72,12 +79,15 @@ while true; do
         r=$(cat $W/$n.restarts 2>/dev/null || echo 0)
         if [ $r -lt 3 ]; then
           echo $((r+1)) > $W/$n.restarts; log "$n not running at step ${step:-0} without final adapter: resume #$((r+1))"
-          resume $d $ug $tg $rg $ap $up
+          resume $d $ug $tg $rg $ap $up $src
         else
           echo "$n FAILED (3 resumes used) at step ${step:-0}" > $W/$n.status; log "$n FAILED after 3 resumes"
         fi
       fi
     fi
+  done
+  for spec in $RUNS $EVAL_ONLY; do
+    IFS=: read n d _ <<< "$spec"; v=$PWD/$d/group_O/verl
     # one evaluation at a time, in the background so failure/hang checks keep running
     if ! { [ -f $W/eval.pid ] && kill -0 $(cat $W/eval.pid) 2>/dev/null; }; then
       for ck in $(ls -d $v/global_step_* 2>/dev/null | sort -V); do
