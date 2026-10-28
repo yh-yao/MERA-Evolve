@@ -7,7 +7,7 @@
 cd /mnt/local_data/users/luzheng/mera_tau2/MERA-Evolve
 W=/mnt/data/users/luzheng/agent_rl/tmp_transfer/r1_4b/watchdog; mkdir -p $W
 M=/mnt/data/users/luzheng/agent_rl/models; T=/mnt/data/users/luzheng/agent_rl/tmp_transfer
-REF=$T/ref4b; EVAL_GPU=0; EVAL_PORT=8460
+REF=$T/ref4b; EVAL_PORT=8460
 log() { echo "[$(date -u +%FT%TZ)] $*" >> $W/watchdog.log; }
 # name dir user_agent_gpu train_gpu rollout_gpu agent_port user_port
 RUNS="G1:$(ls -d results/r3_G1_20261028_0801* | tail -1):5:6:7:8280:8281 G2:$(ls -d results/r3_G2_20261028_0802* | tail -1):2:3:4:8282:8283"
@@ -22,8 +22,11 @@ resume() { # dir ug tg rg ap up
     VLLM_BIN=/mnt/data/users/luzheng/agent_rl/.venv_vllm/bin/vllm TAU2_WORKSPACE=$PWD/../router-skills-evolve \
     setsid nohup bash experiments/tau-2/09_phase1_opd_ablation.sh >> $PWD/$1/driver_resume.log 2>&1 < /dev/null &
 }
-eval_ckpt() { # name dir step  (blocking; runs in the watchdog's eval slot)
-  local n=$1 d=$2 s=$3 out=$PWD/$2/r4/step_$3
+free_gpu() { # a GPU with >= 27 GB free (student + user at 0.42 each); never shares with others' jobs below that
+  nvidia-smi --query-gpu=index,memory.free --format=csv,noheader,nounits | awk -F", " '$2 >= 27000 {print $1; exit}'
+}
+eval_ckpt() { # name dir step gpu (runs in the background eval slot)
+  local n=$1 d=$2 s=$3 out=$PWD/$2/r4/step_$3 EVAL_GPU=$4
   mkdir -p $out
   if [ ! -s $out/adapter/adapter_model.safetensors ]; then
     PYTHONPATH=$PWD .venv_qwen35/bin/python -m verl_code_rl.extract_sft_lora_adapter \
@@ -46,7 +49,9 @@ eval_ckpt() { # name dir step  (blocking; runs in the watchdog's eval slot)
   mkdir -p /tmp/mera_fr_ref && cp -n $REF/base4b_frontier_k8.jsonl /tmp/mera_fr_ref/train_k8_frontier.jsonl
   { echo "== $n step $s ($(date -u +%FT%TZ))"; python3 $REF/mera_diag_analyze.py $T/frontier_base /tmp/mera_fr_ref $out | tail -4;
     python3 $REF/mera_beh_stats.py $out/train_k8_frontier.jsonl; } >> $W/r4_summary.log 2>&1
-  touch $out/EVAL_DONE; log "R4 $n step $s evaluated (see r4_summary.log)"
+  rows=$(wc -l < $out/train_k8_frontier.jsonl 2>/dev/null || echo 0)
+  if [ "$rows" -ge 400 ]; then touch $out/EVAL_DONE; log "R4 $n step $s evaluated ($rows rows; see r4_summary.log)"
+  else log "R4 $n step $s eval incomplete ($rows rows); will retry"; rm -rf $out/served_adapters $out/*.pid; fi
 }
 log "watchdog start: $RUNS"
 while true; do
@@ -78,8 +83,9 @@ while true; do
       for ck in $(ls -d $v/global_step_* 2>/dev/null | sort -V); do
         s=${ck##*_}; [ -f $PWD/$d/r4/step_$s/EVAL_DONE ] && continue
         [ -s $ck/actor/model_world_size_1_rank_0.pt ] || continue
-        log "R4 $n step $s: evaluating on GPU $EVAL_GPU"
-        eval_ckpt $n $d $s & echo $! > $W/eval.pid
+        g=$(free_gpu); [ -n "$g" ] || { log "R4 $n step $s: no free GPU yet, waiting"; break; }
+        log "R4 $n step $s: evaluating on GPU $g"
+        eval_ckpt $n $d $s $g & echo $! > $W/eval.pid
         break
       done
     fi
