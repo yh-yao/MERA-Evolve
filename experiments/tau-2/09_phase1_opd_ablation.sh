@@ -7,6 +7,7 @@
 #   C  distillation only            reverse-KL to the teacher, no task reward
 #   D  GRPO + distillation (main)   reward as B, plus reverse-KL to the teacher
 #   E  D without shaping            official reward only from step 0
+#   O  GRPO, official reward only   no teacher, no shaping (4B + AReaL RL plan)
 #   F  error-point correction SFT   only the teacher's verified fix at the
 #                                   student's first wrong turn is trained
 #                                   (CORRECTIONS_PARQUET, error_points_to_sft)
@@ -90,6 +91,9 @@ export MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-8192}"
 # low (mean response ~5.5k tokens) with a 16k total context.
 export MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-8192}"
 export LORA_TARGET_MODULES="${LORA_TARGET_MODULES:-[q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj]}"
+# Extra VERL overrides from the caller (e.g. memory settings for a larger student).
+read -r -a _extra <<< "${EXTRA_TRAIN_ARGS:-}"
+TRAIN_EXTRA_ARGS+=("${_extra[@]}")
 
 mkdir -p "$RESULTS_DIR"
 LOG="$RESULTS_DIR/phase1.log"
@@ -214,6 +218,7 @@ group_env() {
     C) echo "DISTILLATION=1 DISTILL_USE_TASK_REWARDS=False TAU2_ACTION_RECALL_WEIGHT=0.5 TAU2_ACTION_RECALL_ANNEAL_ROLLOUTS=$TOTAL_ROLLOUTS" ;;
     D) echo "DISTILLATION=1 DISTILL_USE_TASK_REWARDS=True TAU2_ACTION_RECALL_WEIGHT=0.5 TAU2_ACTION_RECALL_ANNEAL_ROLLOUTS=$TOTAL_ROLLOUTS" ;;
     E) echo "DISTILLATION=1 DISTILL_USE_TASK_REWARDS=True TAU2_ACTION_RECALL_WEIGHT=0" ;;
+    O) echo "DISTILLATION=0 TAU2_ACTION_RECALL_WEIGHT=0" ;;  # GRPO on the official tau2 reward only
     *) echo "unknown group $1" >&2; exit 2 ;;
   esac
 }
