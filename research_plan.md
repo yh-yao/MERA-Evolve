@@ -10,8 +10,10 @@
 ## 0. 一句话现状
 
 在 tau2-bench（airline / retail / telecom 客服任务）上，**学生从 Qwen3.5-2B 换成 Qwen3.5-4B 带来了唯一显著的提升（VAL +10.4 点）**；
-之后所有“用老师/数据/RL 再往上推”的尝试都没有显著效果。最新的 4B GRPO 在 32 GB 显卡上做了 250 步，frontier 训练题上没有稳定提升，
+之后“用老师/数据做 SFT/路由”的尝试都没有显著效果。最新的 4B GRPO 在 32 GB 显卡上做了 250 步，frontier 训练题上大多在噪声内来回，
+只用 TRAIN 题训练的 G2 有两个 checkpoint 过线（+5.4 / +5.6 点），但过线的第 200 步在 VAL 上为 −2.2 点（不显著），提升没有迁移（见 1.4）。
 **主要嫌疑是显存逼出来的长度上限：约 30% 的训练对话被截断、奖励记 0**。下一步的核心是在大显存上去掉截断、加大 batch，重新检验 GRPO。
+整套流程已做成一键脚本 `experiments/tau-2/10_4b_rl_pipeline.sh`（第 5.0 节）。
 
 ---
 
@@ -60,9 +62,16 @@
 | checkpoint | G1 | G2 |
 |---|---|---|
 | 50（lr 1e-5） | 60.8%（+2.6 [−2.6, +7.8]） | 61.4%（+3.2 [−2.4, +9.1]） |
-| 100（lr 1e-5） | 58.0% | — |
+| 100（lr 1e-5） | 58.0% | **63.6%（+5.4 [+0.4, +10.6]，过线）** |
 | 150（lr 3e-5） | 61.6%（+3.4 [−2.4, +9.3]） | 59.9% |
-| 200（lr 3e-5） | 58.2% | — |
+| 200（lr 3e-5） | 58.2% | **63.8%（+5.6 [+0.4, +11.2]，过线）** |
+| 250（lr 3e-5） | 59.9%（+1.7） | 62.7%（+4.5 [−1.9, +11.2]） |
+
+  （CI 为对 4B base 逐题配对 bootstrap，`scripts/compare_tasks.py`。）
+  - G2 在 frontier 上持续略高（+4.5 ~ +5.6），G1 基本无变化。
+  - **但 G2 第 200 步的 VAL：34.0% → 31.7%（−2.2 [−7.8, +3.4]），不显著且方向为负。**
+    G2 的 36 道训练题（TRAIN 中 0 < p < 1）有 27 道就在 frontier 的 58 道评测题里，frontier 上的提升很可能是“训练题上学会了”，不是泛化。
+    因此：frontier 只能当“有没有学进去”的信号；是否进 VAL 的门槛之外，**最终结论必须看 VAL**；E2/E3 应考虑把 frontier 评测换成不参与训练的 TRAIN 题，或用 AReaL 留出集。
 
 - 训练奖励 250 步内一直在 0.2–0.35；PPO 裁剪比例约 0.1–0.2%；行为健康（重复调用 0，工具调用数与 base 相同）。
 - **诊断**：`response_length/clip_ratio` 显示 **24–40% 的训练对话被长度上限截断**，记为 0 分。
@@ -106,9 +115,40 @@
 
 ## 5. 实验（按优先级）
 
-所有训练都用 `experiments/tau-2/09_phase1_opd_ablation.sh`，组 `O`（GRPO，只用官方奖励），`SKIP_EVAL=1`，评测另行进行（第 6 节）。
-`experiments/tau-2/scripts/r1_job.sh`、`r3_group.sh`、`r3_watchdog.sh` 是我们在原机器上的包装脚本，**其中的路径是机器相关的**，
-可作为参数组合的参考，需按你的目录改写。
+### 5.0 一键流程：`10_4b_rl_pipeline.sh`
+
+E0–E2 已串成一个脚本，所有设置放在一个配置文件里，按阶段执行，每阶段完成后在 `RUN_DIR` 写 `.done_<阶段>`，中断后用同一配置重跑即从断点继续。
+
+```bash
+cp experiments/tau-2/config/pipeline_4b_rl.env.example my_e2_lr1e-5.env   # 改路径、GPU、学习率
+# 1) 冒烟（约 1 小时）：每个阶段只跑几个任务、GRPO 2 步，确认整条链能通
+SMOKE=1 RUN_DIR=/abs/results/smoke bash experiments/tau-2/10_4b_rl_pipeline.sh my_e2_lr1e-5.env
+# 2) 正式：全部阶段
+bash experiments/tau-2/10_4b_rl_pipeline.sh my_e2_lr1e-5.env
+# 训练期间想边训边评测：另开一个进程
+WATCH=1 bash experiments/tau-2/10_4b_rl_pipeline.sh my_e2_lr1e-5.env evalckpt
+```
+
+| 阶段 | 做什么 | 对应 |
+|---|---|---|
+| `check` | 检查驱动、模型、三个环境、`causal_conv1d`；首次运行时生成 AReaL `valid_task_ids.json` | 第 3、4 节 |
+| `base` | 4B base 的 VAL（种子 300）与 frontier（58 题 × 8） | E0 |
+| `r1` | 4B base 对 AReaL 有效任务与 TRAIN 每题采样 `R1_TRIALS` 次，按 `EVAL_GPUS` 分片并行 | E1 |
+| `select` | 选 0 < p < 1 的题，生成 GRPO parquet（`DATA_MIX=areal+train` 或 `train`，即 G1 / G2） | E1、E3 |
+| `train` | 09 组 `O`，多卡 `TRAIN_GPUS` / `ROLLOUT_GPUS`，可开 TIS；结束时打印平均截断率，> 5% 报警 | E2 |
+| `evalckpt` | 每个 checkpoint → adapter → frontier → 与 base 逐题配对比较（`compare_tasks.py`），写 `eval/step_N/compare.json` | 第 6 节 |
+| `val` | 只对过线（≥ +5 点且 CI 下界 > 0）的 checkpoint 跑 VAL（默认种子 300 + 1300），与 base 比较 | 判定 |
+
+- 所有结果与摘要都追加到 `$RUN_DIR/pipeline.log`；单个阶段可以 `FORCE=1` 重跑。
+- E2 的两档学习率、E3 的 G1/G2 各用一个配置文件 / `RUN_DIR`。
+- 注意：默认 frontier 评测集与 TRAIN 来源的训练题重叠（见 1.4），它只是“学进去没有”的门槛；结论以 VAL 为准。
+  需要留出集门槛时，用 `FRONTIER_PARTITION` 指向不含训练题的划分。
+- 已在 RTX 5090 上冒烟验证 `check → base → r1 → select → train → evalckpt → val`（约 1 小时），包括显式 TIS（日志出现 `rollout_corr/rollout_is_mean ≈ 0.997`）。
+  多卡 `TRAIN_GPUS` 尚未实测，请先冒烟。
+- `TRAIN_BATCH_SIZE × N_GENERATIONS` 必须是 agent loop worker 数（默认 16）的倍数，脚本会提前检查。
+
+以下各小节是每一步的细节与判定规则。底层训练都是 `experiments/tau-2/09_phase1_opd_ablation.sh` 的组 `O`（GRPO，只用官方奖励）、`SKIP_EVAL=1`。
+`experiments/tau-2/scripts/r1_job.sh`、`r3_group.sh`、`r3_watchdog.sh` 是我们在原机器上的包装脚本（**路径与机器相关**），仅作参数参考。
 
 ### E0 复现基线（约 2 GPU 小时）
 
@@ -135,7 +175,7 @@
 | 学习率 | 1e-5 → 3e-5 | 1e-5 与 3e-5 各一组 |
 | LoRA | rank 16，注意力 + MLP | 同左；另加一组 rank 64 或全参数（显存允许时） |
 | actor 精度 | `fsdp_config.model_dtype=bf16` | 80 GB 上可回到 fp32 |
-| 重要性采样修正 | 未开 | **开**：`algorithm.rollout_correction.rollout_is=token`、`rollout_is_threshold=2.0`、`actor_rollout_ref.rollout.calculate_log_probs=True`（需先确认 VERL 版本支持） |
+| 重要性采样修正 | VERL 一步异步默认 `bypass_mode=True`：old_log_prob 直接用 rollout 的 logprob，PPO 比率 π_θ/π_rollout 带裁剪（隐式修正，无显式 IS 权重） | **显式 TIS**：`bypass_mode=False`（decoupled，重算 old_log_prob）+ `rollout_is=token`、`rollout_is_threshold=2.0`、`calculate_log_probs=True`；pipeline 的 `ENABLE_TIS=1` 已包含这四项 |
 | 步数 / checkpoint | 250 / 每 50 | 200 / 每 25 |
 
 - GPU 布局（8 卡）：学生评测服务 + 用户模拟器 1 卡，训练 4 卡，rollout 3 卡，例如 `TRAIN_GPU=0,1,2,3 ROLLOUT_GPU=4,5,6`（`03_grpo_only.sh` 已支持逗号分隔多卡，**多卡尚未实测**，先跑 2 步冒烟）。
@@ -194,7 +234,7 @@
 | actor 默认 fp32 | 4B 在 32 GB 上更新时 OOM | `fsdp_config.model_dtype=bf16` |
 | 权重同步缓冲块小于最大张量 | 同步时报错 | `CHECKPOINT_BUCKET_MB` 要大于词表 embedding（4B bf16 约 1.27 GB） |
 | 长度上限压太低 | 24–40% 对话被截断、奖励记 0 | 本次交接的核心问题，见 E2 |
-| 一步异步 rollout 无重要性采样修正 | rollout 与训练策略的偏差未校正 | E2 中开启 TIS |
+| 以为加了 `rollout_is` 就开了 TIS | one-step off-policy 默认 `bypass_mode=True`，此时 `rollout_is` 权重被忽略（配置照样接受、不报错） | 同时设 `algorithm.rollout_correction.bypass_mode=False`；日志里确认 `rollout_corr/*` 指标出现 |
 
 ---
 
@@ -202,6 +242,8 @@
 
 | 路径 | 作用 |
 |---|---|
+| `experiments/tau-2/10_4b_rl_pipeline.sh`、`config/pipeline_4b_rl.env.example` | 一键流程（第 5.0 节） |
+| `experiments/tau-2/scripts/compare_tasks.py` | 两份多次试验结果的逐题配对比较与过线判定 |
 | `experiments/tau-2/08_phase0_eval_protocol.sh` | 评测协议（起服务、adapter 断言、分块采集、统计） |
 | `experiments/tau-2/09_phase1_opd_ablation.sh` | 训练入口；组 `O` = GRPO 官方奖励；`EXTRA_TRAIN_ARGS`、`SKIP_EVAL` |
 | `experiments/tau-2/03_grpo_only.sh`、`scripts/train_verl_grpo.sh` | VERL GRPO 启动（支持多卡列表） |
