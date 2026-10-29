@@ -26,14 +26,19 @@ resume() { # dir ug tg rg ap up src
     VLLM_BIN=/mnt/data/users/luzheng/agent_rl/.venv_vllm/bin/vllm TAU2_WORKSPACE=$PWD/../router-skills-evolve \
     setsid nohup bash experiments/tau-2/09_phase1_opd_ablation.sh >> $PWD/$1/driver_resume.log 2>&1 < /dev/null &
 }
-free_gpu() { # a GPU with >= 27 GB free (student + user at 0.42 each); never shares with others' jobs below that
-  # never a GPU assigned to our own training runs (their servers may still be loading)
+free_gpu() { # "agent_gpu user_gpu": one GPU with >= 27 GB free, else two GPUs with >= 15 GB free each
+  # (one 0.42-utilisation vLLM server each); never a GPU assigned to our own training runs
   local busy=" $(for spec in $RUNS; do IFS=: read _ _ a b c _ <<< "$spec"; echo -n "$a $b $c "; done)"
-  nvidia-smi --query-gpu=index,memory.free --format=csv,noheader,nounits | while IFS=", " read i f; do
-    [ "$f" -ge 27000 ] && [[ "$busy" != *" $i "* ]] && { echo $i; break; }; done
+  local cand big=()
+  cand=$(nvidia-smi --query-gpu=index,memory.free --format=csv,noheader,nounits | while IFS=", " read i f; do
+    [[ "$busy" == *" $i "* ]] || echo "$i $f"; done)
+  local one=$(echo "$cand" | awk '$2 >= 27000 {print $1; exit}')
+  [ -n "$one" ] && { echo "$one $one"; return; }
+  local two=$(echo "$cand" | awk '$2 >= 15000 {print $1}' | head -2 | tr '\n' ' ')
+  [ $(echo $two | wc -w) -eq 2 ] && echo $two
 }
 eval_ckpt() { # name dir step gpu (runs in the background eval slot)
-  local n=$1 d=$2 s=$3 out=$PWD/$2/r4/step_$3 EVAL_GPU=$4
+  local n=$1 d=$2 s=$3 out=$PWD/$2/r4/step_$3 EVAL_GPU=$4 EVAL_USER_GPU=$5
   mkdir -p $out
   if [ ! -s $out/adapter/adapter_model.safetensors ]; then
     PYTHONPATH=$PWD .venv_qwen35/bin/python -m verl_code_rl.extract_sft_lora_adapter \
@@ -43,7 +48,7 @@ eval_ckpt() { # name dir step gpu (runs in the background eval slot)
   [ -s $out/adapter/adapter_model.safetensors ] || { log "R4 $n step $s: adapter extraction FAILED"; return; }
   TAU2_WORKSPACE=$PWD/../router-skills-evolve TAU2_PARTITION_PATH=$T/frontier_base/split/partition_frontier_only.json \
   SERVERS_DIR=$out BASE_MODEL=$M/Qwen3.5-4B USER_MODEL_PATH=$M/Qwen3.5-4B AGENT_ADAPTER=$out/adapter \
-  VLLM_BIN=/mnt/data/users/luzheng/agent_rl/.venv_vllm/bin/vllm AGENT_GPU=$EVAL_GPU USER_GPU=$EVAL_GPU \
+  VLLM_BIN=/mnt/data/users/luzheng/agent_rl/.venv_vllm/bin/vllm AGENT_GPU=$EVAL_GPU USER_GPU=$EVAL_USER_GPU \
   AGENT_PORT=$EVAL_PORT USER_PORT=$((EVAL_PORT+1)) GPU_MEMORY_UTILIZATION=0.42 VLLM_MAX_NUM_SEQS=128 \
   CHUNK_JOBS=128 REQUEST_TIMEOUT=900 \
   bash experiments/tau-2/scripts/chunked_collect.sh --bucket TRAIN --trials 8 --seed 2000 \
@@ -94,7 +99,7 @@ while true; do
         s=${ck##*_}; [ -f $PWD/$d/r4/step_$s/EVAL_DONE ] && continue
         [ -s $ck/actor/model_world_size_1_rank_0.pt ] || continue
         g=$(free_gpu); [ -n "$g" ] || { log "R4 $n step $s: no free GPU yet, waiting"; break; }
-        log "R4 $n step $s: evaluating on GPU $g"
+        log "R4 $n step $s: evaluating on GPUs (agent user) $g"
         eval_ckpt $n $d $s $g & echo $! > $W/eval.pid
         break
       done
