@@ -25,7 +25,10 @@ export QWEN35_ENABLE_VERL_PATCHES=1
 export QWEN35_TRAIN_TRITON_OVERLAY="${QWEN35_TRAIN_TRITON_OVERLAY:-$ROOT/.deps/qwen35-triton33}"
 export CUDA_VISIBLE_DEVICES="$TRAIN_GPU,$ROLLOUT_GPU"
 export TRAIN_VENV TRAIN_FILE OUTPUT_DIR MODEL_PATH TOTAL_STEPS
-export N_GPUS=1 ROLLOUT_N_GPUS=1 SEPARATE_ROLLOUT=1
+# TRAIN_GPU / ROLLOUT_GPU may be comma-separated lists (e.g. "0,1,2,3" and "4,5,6,7")
+# for a larger node; one GPU each is the setting validated on 32 GB cards.
+export N_GPUS="$(tr ',' '\n' <<< "$TRAIN_GPU" | grep -c .)"
+export ROLLOUT_N_GPUS="$(tr ',' '\n' <<< "$ROLLOUT_GPU" | grep -c .)" SEPARATE_ROLLOUT=1
 export SAVE_FREQ="${SAVE_FREQ:-3}"
 export ACTOR_LR="${ACTOR_LR:-2e-6}"
 export TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-2}"

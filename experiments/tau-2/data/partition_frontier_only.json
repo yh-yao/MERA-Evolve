@@ -1,0 +1,241 @@
+{
+ "version": 2,
+ "note": "diagnostic only: TRAIN = the 58 base-frontier tasks",
+ "TRAIN": [
+  {
+   "domain": "airline",
+   "task_id": "1"
+  },
+  {
+   "domain": "airline",
+   "task_id": "11"
+  },
+  {
+   "domain": "airline",
+   "task_id": "14"
+  },
+  {
+   "domain": "airline",
+   "task_id": "15"
+  },
+  {
+   "domain": "airline",
+   "task_id": "16"
+  },
+  {
+   "domain": "airline",
+   "task_id": "19"
+  },
+  {
+   "domain": "airline",
+   "task_id": "2"
+  },
+  {
+   "domain": "airline",
+   "task_id": "20"
+  },
+  {
+   "domain": "airline",
+   "task_id": "22"
+  },
+  {
+   "domain": "airline",
+   "task_id": "26"
+  },
+  {
+   "domain": "airline",
+   "task_id": "28"
+  },
+  {
+   "domain": "airline",
+   "task_id": "32"
+  },
+  {
+   "domain": "airline",
+   "task_id": "34"
+  },
+  {
+   "domain": "airline",
+   "task_id": "37"
+  },
+  {
+   "domain": "airline",
+   "task_id": "38"
+  },
+  {
+   "domain": "airline",
+   "task_id": "4"
+  },
+  {
+   "domain": "airline",
+   "task_id": "40"
+  },
+  {
+   "domain": "airline",
+   "task_id": "41"
+  },
+  {
+   "domain": "airline",
+   "task_id": "42"
+  },
+  {
+   "domain": "airline",
+   "task_id": "43"
+  },
+  {
+   "domain": "airline",
+   "task_id": "46"
+  },
+  {
+   "domain": "airline",
+   "task_id": "47"
+  },
+  {
+   "domain": "retail",
+   "task_id": "0"
+  },
+  {
+   "domain": "retail",
+   "task_id": "1"
+  },
+  {
+   "domain": "retail",
+   "task_id": "107"
+  },
+  {
+   "domain": "retail",
+   "task_id": "13"
+  },
+  {
+   "domain": "retail",
+   "task_id": "16"
+  },
+  {
+   "domain": "retail",
+   "task_id": "19"
+  },
+  {
+   "domain": "retail",
+   "task_id": "34"
+  },
+  {
+   "domain": "retail",
+   "task_id": "35"
+  },
+  {
+   "domain": "retail",
+   "task_id": "42"
+  },
+  {
+   "domain": "retail",
+   "task_id": "43"
+  },
+  {
+   "domain": "retail",
+   "task_id": "45"
+  },
+  {
+   "domain": "retail",
+   "task_id": "46"
+  },
+  {
+   "domain": "retail",
+   "task_id": "47"
+  },
+  {
+   "domain": "retail",
+   "task_id": "49"
+  },
+  {
+   "domain": "retail",
+   "task_id": "51"
+  },
+  {
+   "domain": "retail",
+   "task_id": "56"
+  },
+  {
+   "domain": "retail",
+   "task_id": "57"
+  },
+  {
+   "domain": "retail",
+   "task_id": "58"
+  },
+  {
+   "domain": "retail",
+   "task_id": "59"
+  },
+  {
+   "domain": "retail",
+   "task_id": "64"
+  },
+  {
+   "domain": "retail",
+   "task_id": "69"
+  },
+  {
+   "domain": "retail",
+   "task_id": "72"
+  },
+  {
+   "domain": "retail",
+   "task_id": "77"
+  },
+  {
+   "domain": "retail",
+   "task_id": "79"
+  },
+  {
+   "domain": "retail",
+   "task_id": "80"
+  },
+  {
+   "domain": "retail",
+   "task_id": "81"
+  },
+  {
+   "domain": "retail",
+   "task_id": "84"
+  },
+  {
+   "domain": "retail",
+   "task_id": "94"
+  },
+  {
+   "domain": "retail",
+   "task_id": "96"
+  },
+  {
+   "domain": "retail",
+   "task_id": "97"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mobile_data_issue]airplane_mode_on|bad_network_preference|data_mode_off|data_usage_exceeded|user_abroad_roaming_disabled_on[PERSONA:None]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mobile_data_issue]airplane_mode_on|bad_network_preference|user_abroad_roaming_enabled_off[PERSONA:Easy]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mobile_data_issue]airplane_mode_on|data_mode_off[PERSONA:None]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[mobile_data_issue]data_usage_exceeded|user_abroad_roaming_enabled_off[PERSONA:Easy]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[service_issue]airplane_mode_on|break_apn_settings|lock_sim_card_pin[PERSONA:None]"
+  },
+  {
+   "domain": "telecom",
+   "task_id": "[service_issue]break_apn_settings|lock_sim_card_pin|overdue_bill_suspension|unseat_sim_card[PERSONA:Easy]"
+  }
+ ],
+ "VAL": [],
+ "EVAL": [],
+ "DIAG": []
+}
