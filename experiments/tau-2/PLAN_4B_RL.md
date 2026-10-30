@@ -1,91 +1,91 @@
-# TAU-2：4B 学生 + AReaL RL 任务的 GRPO 实验计划
+# TAU-2: GRPO experiment plan for the 4B student + AReaL RL tasks
 
-2026-10-28 起。接 `PLAN_4B_A800.md` 的 S2 结论：
+Starting 2026-10-28. Follows from the S2 conclusion in `PLAN_4B_A800.md`:
 
-- 4B 在 AReaL SFT 对话（1,983 段，Claude 生成）上做 LoRA SFT 后，VAL 34.0% → 25.4% / 26.5%
-  （两组学习率都显著下降），frontier 58.2% → 47% / 48%。没有坍塌（重复调用约 0），而是“做得少了”：
-  每条轨迹工具调用 7.6 → 5.3，消息数 38 → 31，“说话 + 调工具同一回合”7.2 → 1.1。
-  判断：学到了合成数据的风格，而合成任务/数据库与官方分布不一致。
-- 2B 用同一批数据也下降（17.2% / 14.6%，3e-5 时重复调用坍塌）。
+- After LoRA SFT of 4B on the AReaL SFT dialogues (1,983 segments, Claude-generated), VAL dropped 34.0% → 25.4% / 26.5%
+  (a significant drop at both learning rates), and frontier 58.2% → 47% / 48%. There was no collapse (repeated calls ~0); instead it "does less":
+  tool calls per trajectory 7.6 → 5.3, messages 38 → 31, "talk + call a tool in the same turn" 7.2 → 1.1.
+  Assessment: it learned the style of the synthetic data, while the synthetic tasks/databases do not match the official distribution.
+- 2B also dropped with the same data (17.2% / 14.6%; repeated-call collapse at 3e-5).
 
-所以本计划**不再做 SFT**，改走 AReaL 的第二段：在学生自己的 rollout 上做 GRPO，奖励只用 tau2 官方判定。
-RL 的更新方向来自“哪条 rollout 成功了”，不会把学生拉向老师的说话风格。
+So this plan **drops SFT** and moves to AReaL's second stage: GRPO on the student's own rollouts, with reward from the official tau2 judgment only.
+The RL update direction comes from "which rollout succeeded", so it does not pull the student toward the teacher's speaking style.
 
-## 不变的约定
+## Fixed conventions
 
-- 划分 `partition_v2.json` 不改；VAL/EVAL 只评测不训练；EVAL 只在最后报告。
-- AReaL RL 任务里有 4 个 telecom 任务的故障组合与 VAL/EVAL 相同（按 `initial_state` 精确比对），剔除。
-- 评测用合并后的完整 checkpoint（LoRA 覆盖 GDN 投影，vLLM 的 LoRA 路径不完整）。
-- 训练期用户模拟器：本地 Qwen3.5-4B（与所有已测基线一致）。
+- The split `partition_v2.json` is unchanged; VAL/EVAL are evaluation only, never trained on; EVAL is reported only at the end.
+- 4 telecom tasks in the AReaL RL set have the same fault combinations as VAL/EVAL (exact match on `initial_state`); they are removed.
+- Evaluation uses merged full checkpoints (the LoRA covers the GDN projections, and vLLM's LoRA path is incomplete).
+- Training-time user simulator: local Qwen3.5-4B (same as all baselines measured so far).
 
-## 参照
+## Reference
 
-| 模型 | VAL | frontier（58 题 × 8） |
+| Model | VAL | frontier (58 tasks × 8) |
 |---|---|---|
 | 4B base | 34.0% | 58.2% |
-| 27B 全程作答 | 31.7% | 59.3% |
+| 27B answering throughout | 31.7% | 59.3% |
 
-## 步骤
+## Steps
 
-### R0 环境：运行 AReaL 合成任务（约 3–4 小时）
+### R0 Environment: run AReaL synthetic tasks (about 3–4 hours)
 
-做什么：
-- `benchmark.load_task` 支持 `areal:<id>` 形式的任务 id，从 `tau2_rl_train.jsonl` 读取并转成 tau2 Task。
-- 每个任务的 `db_path` 数据库在**运行和评测时**都要生效：用按调用上下文（contextvar）选择的环境构造器，
-  替换 tau2 registry 的默认构造器，避免并发 rollout 之间互相串库。
-- 单元测试：同一任务用默认库和指定库分别执行一个查询工具，结果应不同；对 AReaL 任务回放
-  `evaluation_criteria` 里的标准动作，奖励应为 1。
+What to do:
+- `benchmark.load_task` supports task ids of the form `areal:<id>`, reading from `tau2_rl_train.jsonl` and converting to a tau2 Task.
+- Each task's `db_path` database must take effect **at both run and evaluation time**: replace the tau2 registry's default constructor
+  with an environment constructor selected by call context (contextvar), so concurrent rollouts do not leak into each other's databases.
+- Unit tests: running one query tool on the same task with the default database and with the specified database should give different results; replaying
+  the reference actions in `evaluation_criteria` for an AReaL task should give reward 1.
 
-没达到时：
-- 标准动作回放奖励不为 1：先查数据库是否加载对、telecom 的 `initial_state` 是否执行；
-  仍不对的任务（AReaL 与我们 tau2 版本不兼容）直接剔除，并记录比例。比例超过 20% 就先只用 airline/retail。
+If not met:
+- Reference-action replay reward is not 1: first check that the database is loaded correctly and that telecom's `initial_state` is executed;
+  tasks that still fail (AReaL incompatible with our tau2 version) are removed, and the fraction is recorded. If the fraction exceeds 20%, use only airline/retail for now.
 
-### R1 用 4B base 筛选任务（约 2–3 小时，4 组卡并行）
+### R1 Task filtering with 4B base (about 2–3 hours, 4 GPU groups in parallel)
 
-做什么：4B base 在 AReaL 任务上每题 4 次（温度 1.0，与 frontier 诊断一致），得到每题成功率 p 和开场用户消息；
-同时对我们 TRAIN 的 139 题复用已有的 4B 结果。
+What to do: run 4B base on the AReaL tasks 4 times per task (temperature 1.0, same as the frontier diagnostic) to get each task's success rate p and opening user message;
+also reuse the existing 4B results for the 139 tasks in our TRAIN.
 
-预期：有足够多 0 < p < 1 的任务（目标 ≥ 300 题）。
+Expected: enough tasks with 0 < p < 1 (target ≥ 300 tasks).
 
-没达到时：
-- 时对时错的题太少：每题采样提高到 8 次；或放宽为 p ≤ 0.75 的题都保留。
-- 全对的题占绝大多数：说明这些合成任务对 4B 太简单，只保留 airline（AReaL 中较难的部分）和 telecom。
+If not met:
+- Too few tasks that are sometimes right, sometimes wrong: raise sampling to 8 per task; or relax to keep all tasks with p ≤ 0.75.
+- The vast majority are always solved: these synthetic tasks are too easy for 4B; keep only airline (the harder part of AReaL) and telecom.
 
-### R2 4B GRPO 冒烟（约 1–2 小时）
+### R2 4B GRPO smoke test (about 1–2 hours)
 
-做什么：在 5090 上跑 2–3 步，确认显存。起点：LoRA 覆盖全部线性层、batch 4 × 8 次生成、响应上限 8k、
-总长 16k、梯度检查点、fused kernels（2B 已验证的设置）。
+What to do: run 2–3 steps on the 5090s to confirm memory. Starting point: LoRA on all linear layers, batch 4 × 8 generations, response limit 8k,
+total length 16k, gradient checkpointing, fused kernels (settings validated on 2B).
 
-没达到时（OOM）：依次尝试 batch 2、响应上限 6k、每卡 micro batch 1、参数卸载到 CPU；
-仍不行就只训 LoRA 覆盖注意力和 MLP（不含 GDN 投影）。
+If not met (OOM): try in order batch 2, response limit 6k, per-GPU micro batch 1, parameter offload to CPU;
+if it still fails, train LoRA on attention and MLP only (excluding the GDN projections).
 
-### R3 正式 GRPO（约 15–25 小时）
+### R3 Full GRPO (about 15–25 hours)
 
-两组并行（002 上 2 × 4 卡），各约 150 步，lr 1e-5，每 25 步存 checkpoint：
-- G1：AReaL 时对时错的任务 + 我们 TRAIN 的 frontier 题（混合）。
-- G2：只用我们 TRAIN 的 frontier 题（对照：AReaL 任务是否带来额外收益）。
+Two groups in parallel (2 × 4 GPUs on 002), about 150 steps each, lr 1e-5, checkpoint every 25 steps:
+- G1: AReaL sometimes-right/sometimes-wrong tasks + our TRAIN frontier tasks (mixed).
+- G2: our TRAIN frontier tasks only (control: whether AReaL tasks add extra benefit).
 
-监控：训练奖励、组内奖励方差、重复调用、每条轨迹工具调用数。
+Monitor: training reward, within-group reward variance, repeated calls, tool calls per trajectory.
 
-没达到时：
-- 奖励不升且模型几乎不动（KL 极小）：lr 提到 3e-5，或每步题数加倍。
-- 奖励上升但 frontier/VAL 下降：说明在合成任务上过拟合，提高 TRAIN 题占比，或提前用更早的 checkpoint。
-- 出现重复调用坍塌：回到上一个 checkpoint，lr 减半。
+If not met:
+- Reward does not rise and the model barely moves (KL tiny): raise lr to 3e-5, or double the tasks per step.
+- Reward rises but frontier/VAL drops: overfitting to the synthetic tasks; raise the TRAIN task fraction, or fall back to an earlier checkpoint.
+- Repeated-call collapse: roll back to the previous checkpoint and halve the lr.
 
-### R4 评测（训练期间穿插，最后约 2 小时）
+### R4 Evaluation (interleaved during training, about 2 hours at the end)
 
-每个 checkpoint 先测 frontier（灵敏），通过线：比 4B base 高 ≥ 5 点且 95% CI 下界 > 0；
-通过的再测 VAL（种子 300，最好的再补 1300）。
+Each checkpoint is first tested on frontier (sensitive). Bar: ≥ 5 points above 4B base with 95% CI lower bound > 0;
+those that pass the bar are then tested on VAL (seed 300; the best one also gets 1300).
 
-### 并行：A800 的 CUDA 12 向前兼容测试
+### Parallel: CUDA 12 forward-compatibility test on the A800
 
-在数据平台下载 CUDA 12 版 torch/vLLM 与兼容库，A800 上测试。成功则后续 RL 和评测都可以移到 A800（8 × 80 GB）。
+Download CUDA 12 builds of torch/vLLM and the compatibility libraries on the data platform and test them on the A800. If it works, subsequent RL and evaluation can all move to the A800 (8 × 80 GB).
 
-## 时间线（预估）
+## Timeline (estimated)
 
-| 时间 | 内容 |
+| Time | Content |
 |---|---|
-| 10/28 上午 | R0 环境与测试 |
-| 10/28 下午 | R1 筛选；R2 冒烟 |
-| 10/28 晚 – 10/29 | R3 训练，穿插 R4 |
-| 10/29 晚 – 10/30 | 结论与下一步 |
+| 10/28 morning | R0 environment and tests |
+| 10/28 afternoon | R1 filtering; R2 smoke test |
+| 10/28 evening – 10/29 | R3 training, interleaved with R4 |
+| 10/29 evening – 10/30 | Conclusions and next steps |

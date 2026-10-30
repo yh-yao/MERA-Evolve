@@ -1,280 +1,310 @@
-# TAU-2 研究计划：4B 学生的强化学习（交接给大算力团队）
+# TAU-2 Research Plan: RL for a 4B Student (handoff to a larger-compute team)
 
-本文档写给接手实验、拥有更强算力的同学。读完应能独立复现已有结论，并跑完下一阶段的关键实验。
-仓库的通用说明（环境、启动脚本、不变的约定）见 `CLAUDE.md`；本文只讲 tau2 这条线。
+This document is for the people taking over these experiments with more compute. After reading it you should be able to
+reproduce the existing results on your own and run the key experiments of the next phase.
+General repository instructions (environments, launchers, invariants) are in `CLAUDE.md`; this document covers only the tau2 line.
 
-分支：`tau2-4b-rl-handoff`（基于 `tau2-phase0-1-opd-27b`，包含全部代码与实验脚本）。
-
----
-
-## 0. 一句话现状
-
-在 tau2-bench（airline / retail / telecom 客服任务）上，**学生从 Qwen3.5-2B 换成 Qwen3.5-4B 带来了唯一显著的提升（VAL +10.4 点）**；
-之后“用老师/数据做 SFT/路由”的尝试都没有显著效果。最新的 4B GRPO 在 32 GB 显卡上做了 250 步，frontier 训练题上大多在噪声内来回，
-只用 TRAIN 题训练的 G2 有两个 checkpoint 过线（+5.4 / +5.6 点），但过线的第 200 步在 VAL 上为 −2.2 点（不显著），提升没有迁移（见 1.4）。
-**主要嫌疑是显存逼出来的长度上限：约 30% 的训练对话被截断、奖励记 0**。下一步的核心是在大显存上去掉截断、加大 batch，重新检验 GRPO。
-整套流程已做成一键脚本 `experiments/tau-2/10_4b_rl_pipeline.sh`（第 5.0 节）。
+Branch: `tau2-4b-rl-handoff` (based on `tau2-phase0-1-opd-27b`; contains all code and experiment scripts).
 
 ---
 
-## 1. 背景与已有结论
+## 0. Status in one paragraph
 
-### 1.1 评测协议（Phase 0，已固定，请勿改动）
+On tau2-bench (airline / retail / telecom customer-service tasks), **switching the student from Qwen3.5-2B to Qwen3.5-4B is the only
+significant improvement so far (VAL +10.4 pt)**. Later attempts to push further with a teacher, extra data for SFT, or routing had no
+significant effect. The latest 4B GRPO ran 250 steps on 32 GB GPUs; on the frontier training tasks it mostly moved within noise.
+G2, trained only on TRAIN tasks, had two checkpoints pass the bar (+5.4 / +5.6 pt), but the passing step 200 scored −2.2 pt on VAL
+(not significant): the gain did not transfer (see 1.4).
+**The main suspect is the length cap forced by GPU memory: about 30% of training conversations were truncated and scored 0.**
+The core of the next phase is to remove truncation and enlarge the batch on large-memory GPUs, then re-test GRPO.
+The whole workflow is a one-command script, `experiments/tau-2/10_4b_rl_pipeline.sh` (Section 5.0).
 
-- 划分：`experiments/tau-2/data/partition_v2.json`，TRAIN 139 / VAL 67 / EVAL 67 题。选模型、调参只看 TRAIN 衍生集和 VAL；EVAL 只在最后报告一次。
-- 每题 4 次试验（用户模拟器温度 0.7、每次换种子），报告 pass^1 与 pass^4，配对 bootstrap 95% CI 与 McNemar（`tau2_evolve/eval_stats.py`）。
-- 单次 VAL（种子 300）的最小可检测差异约 **10 点**；合并种子 300 + 1300（8 次试验）约 **7 点**。
-- **frontier 训练题**：58 道题（2B base 在 8 次采样里时对时错的 TRAIN 题），每题 8 次、智能体温度 1.0、用户温度 0、最多 40 步。
-  比 VAL 灵敏得多（约 5 点即可见），用于判断“训练到底学进去没有”。这 58 题固定在
-  `experiments/tau-2/data/partition_frontier_only.json`（retail 30 / airline 22 / telecom 6，放在 TRAIN 桶里），
-  评测时用 `TAU2_PARTITION_PATH` 指向它；它们来自 `tau2_evolve/frontier.py` 对 2B base 8 次采样的分桶结果。
-- 训练期与本文所有数字的用户模拟器：本地 **Qwen3.5-4B**。最终 EVAL 计划换成托管强模型做用户模拟器（需要 API key，尚未做）。
+---
 
-### 1.2 参照数字
+## 1. Background and results so far
 
-| 模型 | VAL pass^1 | frontier（58 题 × 8） | TRAIN 贪心（139 题 × 1） |
+### 1.1 Evaluation protocol (Phase 0, fixed — do not change)
+
+- Split: `experiments/tau-2/data/partition_v2.json`, TRAIN 139 / VAL 67 / EVAL 67 tasks. Model selection and tuning use only
+  TRAIN-derived sets and VAL; EVAL is reported once, at the end.
+- 4 trials per task (user-simulator temperature 0.7, a different seed per trial); report pass^1 and pass^4 with paired
+  bootstrap 95% CIs and McNemar tests (`tau2_evolve/eval_stats.py`).
+- Minimum detectable difference: about **10 pt** for a single VAL run (seed 300), about **7 pt** for seeds 300 + 1300 combined (8 trials).
+- **Frontier training tasks**: 58 TRAIN tasks that the 2B base sometimes solves and sometimes fails across 8 samples;
+  8 trials per task, agent temperature 1.0, user temperature 0, at most 40 steps.
+  Much more sensitive than VAL (about 5 pt is visible); used to tell whether training learned anything at all. The 58 tasks are fixed in
+  `experiments/tau-2/data/partition_frontier_only.json` (retail 30 / airline 22 / telecom 6, in the TRAIN bucket);
+  point `TAU2_PARTITION_PATH` at it for evaluation. They come from `tau2_evolve/frontier.py` bucketing 8 samples of the 2B base.
+- User simulator for training and for every number in this document: local **Qwen3.5-4B**. The final EVAL is planned with a hosted
+  strong model as the user simulator (needs an API key; not done yet).
+
+### 1.2 Reference numbers
+
+| Model | VAL pass^1 | Frontier (58 tasks × 8) | TRAIN greedy (139 tasks × 1) |
 |---|---|---|---|
 | Qwen3.5-2B | 23.5% | 45.0% | 31.2% |
-| **Qwen3.5-4B** | **34.0%**（vs 2B +10.4 [+4.1, +16.8]） | **58.2%** | 44.9%（airline 81.8 / retail 66.7 / telecom 1.9） |
-| Qwen3.8-27B（全程作答） | 31.7% | 59.3% | — |
+| **Qwen3.5-4B** | **34.0%** (vs 2B +10.4 [+4.1, +16.8]) | **58.2%** | 44.9% (airline 81.8 / retail 66.7 / telecom 1.9) |
+| Qwen3.8-27B (answers every turn) | 31.7% | 59.3% | — |
 
-要点：4B 已与 27B 老师打平，所以“用 27B 教 4B”没有可测空间；telecom 对所有本地模型都接近 0（2–20%）。
+Takeaways: 4B already matches the 27B teacher, so "teach 4B with 27B" has no measurable headroom; telecom is near 0 (2–20%) for every local model.
 
-### 1.3 试过且无效的方向（不要重复）
+### 1.3 Directions tried without success (do not repeat)
 
-| 方向 | 结果 | 结论 |
+| Direction | Result | Conclusion |
 |---|---|---|
-| 2B：GRPO、全 token 蒸馏（强/弱）、出错点纠错 SFT 等 13 组配置 | 无一显著超过 base；强蒸馏导致重复调用坍塌 | 2B 难以吸收老师能力 |
-| 出错点纠错 SFT（教老师在学生第一个错处的动作） | 能改对出错点决策（4/45 → 34/45），但 VAL 不升反降 | 一条失败轨迹往往不止一个错；只纠一处不够 |
-| 逐轮 Router（不同时机交给 27B） | 10–30% 老师轮次下 −3 到 +5 点，均不显著；“分歧即用老师”的 oracle 仅 +1.5 | 逐动作替换拿不回老师的优势 |
-| 4B 在 AReaL-tau2-data 的 1,983 段 SFT 对话上做 LoRA SFT | VAL 34.0 → 25.4 / 26.5（两档学习率，均显著下降） | 学到了合成数据（Claude 生成、合成数据库）的风格，“做得少了” |
-| 4B GRPO（详见 1.4） | frontier 58–62% 来回，无趋势 | 见下 |
+| 2B: GRPO, full-token distillation (strong/weak), error-point correction SFT, etc. — 13 configurations | None significantly above base; strong distillation caused repeated-call collapse | 2B struggles to absorb the teacher's ability |
+| Error-point correction SFT (teach the teacher's action at the student's first mistake) | Fixes the targeted decisions (4/45 → 34/45), but VAL goes down, not up | A failed trajectory usually has more than one mistake; fixing one is not enough |
+| Per-turn router (hand turns to 27B at different points) | −3 to +5 pt at 10–30% teacher turns, none significant; the "teacher on disagreement" oracle only +1.5 | Per-action substitution does not recover the teacher's advantage |
+| 4B LoRA SFT on the 1,983 SFT dialogues of AReaL-tau2-data | VAL 34.0 → 25.4 / 26.5 (two learning rates, both significantly worse) | It learned the style of the synthetic data (Claude-generated, synthetic DBs) and "does less" |
+| 4B GRPO (see 1.4) | Frontier moves between 58–62%, no trend | See below |
 
-### 1.4 最近一次：4B GRPO（32 GB RTX 5090，LoRA）
+### 1.4 Most recent: 4B GRPO (32 GB RTX 5090, LoRA)
 
-- 数据：AReaL RL 任务中能通过标准动作回放的 1,844 个（airline 1148 / retail 563 / telecom 133），用 4B base 每题采样 4 次，
-  保留 0 < p < 1 的 546 题；另加 TRAIN 中 0 < p < 1 的 36 题。
-- 两组：G1 = 546 + 36，G2 = 只用 36 道 TRAIN 题（对照）。奖励只用 tau2 官方判定（组名 `O`）。
-- 设置：LoRA rank 16（注意力 + MLP），每步 4 题 × 8 次生成，前 100 步 lr 1e-5，之后从第 100 步 adapter 以 lr 3e-5 再训 150 步；
-  prompt 上限 8192，**回复（整段多轮）上限 5632–6144 token**，最多 30 轮。
-- frontier 结果（4B base 58.2%）：
+- Data: the 1,844 AReaL RL tasks whose gold actions replay correctly (airline 1148 / retail 563 / telecom 133); 4 samples per task
+  from the 4B base, keeping the 546 tasks with 0 < p < 1; plus the 36 TRAIN tasks with 0 < p < 1.
+- Two groups: G1 = 546 + 36, G2 = only the 36 TRAIN tasks (control). Reward is the official tau2 verdict only (group `O`).
+- Settings: LoRA rank 16 (attention + MLP), 4 prompts × 8 generations per step, lr 1e-5 for the first 100 steps, then another
+  150 steps at lr 3e-5 from the step-100 adapter; prompt cap 8192, **response cap (the whole multi-turn conversation) 5632–6144 tokens**, at most 30 turns.
+- Frontier results (4B base 58.2%):
 
-| checkpoint | G1 | G2 |
+| Checkpoint | G1 | G2 |
 |---|---|---|
-| 50（lr 1e-5） | 60.8%（+2.6 [−2.6, +7.8]） | 61.4%（+3.2 [−2.4, +9.1]） |
-| 100（lr 1e-5） | 58.0% | **63.6%（+5.4 [+0.4, +10.6]，过线）** |
-| 150（lr 3e-5） | 61.6%（+3.4 [−2.4, +9.3]） | 59.9% |
-| 200（lr 3e-5） | 58.2% | **63.8%（+5.6 [+0.4, +11.2]，过线）** |
-| 250（lr 3e-5） | 59.9%（+1.7） | 62.7%（+4.5 [−1.9, +11.2]） |
+| 50 (lr 1e-5) | 60.8% (+2.6 [−2.6, +7.8]) | 61.4% (+3.2 [−2.4, +9.1]) |
+| 100 (lr 1e-5) | 58.0% | **63.6% (+5.4 [+0.4, +10.6], passes)** |
+| 150 (lr 3e-5) | 61.6% (+3.4 [−2.4, +9.3]) | 59.9% |
+| 200 (lr 3e-5) | 58.2% | **63.8% (+5.6 [+0.4, +11.2], passes)** |
+| 250 (lr 3e-5) | 59.9% (+1.7) | 62.7% (+4.5 [−1.9, +11.2]) |
 
-  （CI 为对 4B base 逐题配对 bootstrap，`scripts/compare_tasks.py`。）
-  - G2 在 frontier 上持续略高（+4.5 ~ +5.6），G1 基本无变化。
-  - **但 G2 第 200 步的 VAL：34.0% → 31.7%（−2.2 [−7.8, +3.4]），不显著且方向为负。**
-    G2 的 36 道训练题（TRAIN 中 0 < p < 1）有 27 道就在 frontier 的 58 道评测题里，frontier 上的提升很可能是“训练题上学会了”，不是泛化。
-    因此：frontier 只能当“有没有学进去”的信号；是否进 VAL 的门槛之外，**最终结论必须看 VAL**；E2/E3 应考虑把 frontier 评测换成不参与训练的 TRAIN 题，或用 AReaL 留出集。
+  (CIs are per-task paired bootstrap against the 4B base, `scripts/compare_tasks.py`.)
+  - G2 stays slightly higher on the frontier (+4.5 to +5.6); G1 barely changes.
+  - **But G2 step 200 on VAL: 34.0% → 31.7% (−2.2 [−7.8, +3.4]), not significant and in the wrong direction.**
+    27 of G2's 36 training tasks (TRAIN tasks with 0 < p < 1) are among the 58 frontier evaluation tasks, so the frontier gain most likely
+    means "learned the training tasks", not generalization.
+    Therefore the frontier is only a signal of whether training learned anything; beyond being the gate for VAL, **final conclusions must
+    come from VAL**. E2/E3 should consider evaluating the frontier on TRAIN tasks not used for training, or on an AReaL held-out set.
 
-- 训练奖励 250 步内一直在 0.2–0.35；PPO 裁剪比例约 0.1–0.2%；行为健康（重复调用 0，工具调用数与 base 相同）。
-- **诊断**：`response_length/clip_ratio` 显示 **24–40% 的训练对话被长度上限截断**，记为 0 分。
-  这些题在 R1 采样（无长度上限）里 4B 的成功率约为一半，而训练奖励只有 0.25–0.3，差额主要是截断与轮数上限造成的“假失败”。
-  同时每步只有 4 题，梯度方差大。两者都是 32 GB 显存逼出来的。
-
----
-
-## 2. 下一阶段要回答的问题
-
-1. **Q1（主问题）**：去掉截断、加大 batch 后，GRPO 能否让 4B 在 frontier 上显著提升（≥ +5 点且 CI 下界 > 0），并迁移到 VAL？
-2. **Q2**：AReaL 合成任务（G1）相对只用官方 TRAIN 题（G2）是否有额外收益？
-3. **Q3**：若 Q1 为否，问题是否在信用分配（长对话、只有终局奖励）？用 PPO+critic 或分轮次优势估计检验。
-4. **Q4**：最终在 EVAL 上用托管用户模拟器报告 4B base 与最佳模型。
+- Training reward stayed at 0.2–0.35 for all 250 steps; PPO clip fraction about 0.1–0.2%; behavior healthy (0 repeated calls,
+  same number of tool calls as base).
+- **Diagnosis**: `response_length/clip_ratio` shows **24–40% of training conversations truncated by the length cap**, scored 0.
+  In R1 sampling (no length cap) 4B solves these tasks about half the time, yet training reward is only 0.25–0.3; the gap is mostly
+  "false failures" from truncation and the turn cap. In addition, only 4 prompts per step gives high gradient variance.
+  Both are consequences of 32 GB of GPU memory.
 
 ---
 
-## 3. 硬件与环境
+## 2. Questions for the next phase
 
-- 推荐：单机 8 × 80 GB（A100 / H100 / A800），**NVIDIA 驱动 ≥ 570（CUDA 12.8+）**。驱动低于 535 时，支持 Qwen3.5 的 vLLM 起不来，GRPO 无法运行（SFT 可以）。
-- 训练环境（VERL 0.8 + 内置 vLLM 0.18，`.venv_qwen35`）与服务环境（vLLM 0.29，用于评测）按 `CLAUDE.md` 与 `requirements-qwen35-cu129.txt` 搭建；tau2 环境用独立 venv（`TAU2_WORKSPACE`）。
-- Qwen3.5 的 GDN 层**必须走快速路径**：需要 `flash-linear-attention` 与 `causal-conv1d`。缺 `causal-conv1d` 时 transformers 会静默退回纯 torch 实现（训练慢 2.5 倍以上），日志里搜 “fast path is not available”。
-- 模型：Qwen3.5-4B（学生、用户模拟器），可选 Qwen3.8-27B（老师/上限参照）。
+1. **Q1 (main question)**: with truncation removed and a larger batch, does GRPO significantly improve 4B on the frontier
+   (≥ +5 pt with CI lower bound > 0), and does it transfer to VAL?
+2. **Q2**: do the AReaL synthetic tasks (G1) add anything over the official TRAIN tasks alone (G2)?
+3. **Q3**: if Q1 is no, is the problem credit assignment (long conversations, terminal reward only)? Test with PPO + critic or per-turn advantage estimates.
+4. **Q4**: report the 4B base and the best model on EVAL with a hosted user simulator.
 
 ---
 
-## 4. 数据准备（约半天，CPU 为主）
+## 3. Hardware and environment
 
-1. tau2-bench 固定在提交 `17e07b1da2bbc0cadfddeea36412686e0604127b`（见 `CLAUDE.md`）。
-2. AReaL 数据：`inclusionAI/AReaL-tau2-data`（Apache-2.0，ModelScope / HuggingFace 均有）。设 `MERA_AREAL_DIR` 指向下载目录。
-3. 筛掉无法回放的任务（约 45% 的 telecom 任务在我们固定的 tau2 版本下回放不到断言状态）：
+- **To build the environments and download models and data from scratch, follow `experiments/tau-2/SETUP_4B_RL.md`**
+  (two scripts, `scripts/setup_envs.sh` and `scripts/download_assets.sh`; written for AWS, official sources by default, optional S3 cache for models and data).
+- Recommended: one node with 8 × 80 GB (A100 / H100 / A800), **NVIDIA driver ≥ 580**: the vLLM 0.29 used for evaluation ships CUDA 13
+  torch; the training environment is cu128 and needs ≥ 570. Below 535, no vLLM that supports Qwen3.5 starts, so GRPO cannot run (SFT can).
+- The training environment (VERL 0.8 + bundled vLLM 0.18, `.venv_qwen35`) and the serving environment (vLLM 0.29, for evaluation)
+  are built by `setup_envs.sh` (background in the comments of `requirements-qwen35-cu129.txt`); tau2 runs in its own venv (`TAU2_WORKSPACE`).
+- Qwen3.5's GDN layers **must use the fast path**: this needs `flash-linear-attention` and `causal-conv1d`. Without `causal-conv1d`,
+  transformers silently falls back to a pure-torch implementation (training 2.5× slower or worse); search the logs for "fast path is not available".
+- Models: Qwen3.5-4B (student and user simulator); optionally Qwen3.8-27B (teacher / upper-bound reference).
+
+---
+
+## 4. Data preparation (about 1 hour, mostly CPU)
+
+1. tau2-bench is pinned at commit `17e07b1da2bbc0cadfddeea36412686e0604127b` (see `CLAUDE.md`).
+2. AReaL data: `inclusionAI/AReaL-tau2-data` (Apache-2.0, on both Hugging Face and ModelScope); download it with
+   `scripts/download_assets.sh areal`. Point `MERA_AREAL_DIR` at the download directory.
+3. Drop tasks that cannot be replayed (about 45% of telecom tasks do not reach their asserted state under our pinned tau2 version):
    ```bash
    python experiments/tau-2/scripts/check_areal_tasks.py --write-valid $MERA_AREAL_DIR/valid_task_ids.json
    ```
-   `tau2_evolve/areal_tasks.py` 会自动读取该文件，并剔除与 VAL/EVAL 故障组合相同的 4 个 telecom 任务。
-   预期：airline 1148/1148、retail 563/563、telecom 约 133/267 通过。
-4. AReaL 任务按任务加载各自的数据库快照（contextvar 作用域内替换 tau2 的环境构造器，并发安全），运行与评测都生效；
-   `collect_traces --bucket AREAL` 即可采样。
+   `tau2_evolve/areal_tasks.py` reads this file automatically and also excludes 4 telecom tasks whose fault combinations match VAL/EVAL tasks.
+   Expected: airline 1148/1148, retail 563/563, telecom about 133/267 pass. (The pipeline's `check` stage runs this for you.)
+4. Each AReaL task loads its own database snapshot (tau2's environment constructor is replaced inside a contextvar scope, so it is
+   concurrency-safe), for both rollouts and evaluation; `collect_traces --bucket AREAL` samples them.
 
 ---
 
-## 5. 实验（按优先级）
+## 5. Experiments (in priority order)
 
-### 5.0 一键流程：`10_4b_rl_pipeline.sh`
+### 5.0 One-command workflow: `10_4b_rl_pipeline.sh`
 
-E0–E2 已串成一个脚本，所有设置放在一个配置文件里，按阶段执行，每阶段完成后在 `RUN_DIR` 写 `.done_<阶段>`，中断后用同一配置重跑即从断点继续。
+E0–E2 are chained in one script. All settings live in one config file; stages run in order and each writes `.done_<stage>` to
+`RUN_DIR` when it finishes, so after an interruption re-running with the same config resumes where it stopped.
 
 ```bash
-cp experiments/tau-2/config/pipeline_4b_rl.env.example my_e2_lr1e-5.env   # 改路径、GPU、学习率
-# 1) 冒烟（约 1 小时）：每个阶段只跑几个任务、GRPO 2 步，确认整条链能通
+cp experiments/tau-2/config/pipeline_4b_rl.env.example my_e2_lr1e-5.env   # edit paths, GPUs, learning rate
+# 1) smoke test (about 1 hour): a few tasks per stage, 2 GRPO steps, to check the whole chain works
 SMOKE=1 RUN_DIR=/abs/results/smoke bash experiments/tau-2/10_4b_rl_pipeline.sh my_e2_lr1e-5.env
-# 2) 正式：全部阶段
+# 2) full run: all stages
 bash experiments/tau-2/10_4b_rl_pipeline.sh my_e2_lr1e-5.env
-# 训练期间想边训边评测：另开一个进程
+# evaluate checkpoints while training runs: a second process
 WATCH=1 bash experiments/tau-2/10_4b_rl_pipeline.sh my_e2_lr1e-5.env evalckpt
 ```
 
-| 阶段 | 做什么 | 对应 |
+| Stage | What it does | Corresponds to |
 |---|---|---|
-| `check` | 检查驱动、模型、三个环境、`causal_conv1d`；首次运行时生成 AReaL `valid_task_ids.json` | 第 3、4 节 |
-| `base` | 4B base 的 VAL（种子 300）与 frontier（58 题 × 8） | E0 |
-| `r1` | 4B base 对 AReaL 有效任务与 TRAIN 每题采样 `R1_TRIALS` 次，按 `EVAL_GPUS` 分片并行 | E1 |
-| `select` | 选 0 < p < 1 的题，生成 GRPO parquet（`DATA_MIX=areal+train` 或 `train`，即 G1 / G2） | E1、E3 |
-| `train` | 09 组 `O`，多卡 `TRAIN_GPUS` / `ROLLOUT_GPUS`，可开 TIS；结束时打印平均截断率，> 5% 报警 | E2 |
-| `evalckpt` | 每个 checkpoint → adapter → frontier → 与 base 逐题配对比较（`compare_tasks.py`），写 `eval/step_N/compare.json` | 第 6 节 |
-| `val` | 只对过线（≥ +5 点且 CI 下界 > 0）的 checkpoint 跑 VAL（默认种子 300 + 1300），与 base 比较 | 判定 |
+| `check` | Checks driver, models, the three environments, `causal_conv1d`; on first run builds the AReaL `valid_task_ids.json` | Sections 3, 4 |
+| `base` | 4B base on VAL (seed 300) and on the frontier (58 tasks × 8) | E0 |
+| `r1` | 4B base samples each valid AReaL task and each TRAIN task `R1_TRIALS` times, sharded over `EVAL_GPUS` | E1 |
+| `select` | Picks tasks with 0 < p < 1 as GRPO prompts (`DATA_MIX=areal+train` or `train`, i.e. G1 / G2) | E1, E3 |
+| `train` | Builds the GRPO parquet and runs group `O` of 09, multi-GPU `TRAIN_GPUS` / `ROLLOUT_GPUS`, optional TIS; prints the mean truncation rate at the end and warns above 5% | E2 |
+| `evalckpt` | Each checkpoint → adapter → frontier → per-task paired comparison with base (`compare_tasks.py`), written to `eval/step_N/compare.json` | Section 6 |
+| `val` | VAL (seeds 300 + 1300 by default) only for checkpoints that pass the bar (≥ +5 pt and CI lower bound > 0), compared with base | Decision |
 
-- 所有结果与摘要都追加到 `$RUN_DIR/pipeline.log`；单个阶段可以 `FORCE=1` 重跑。
-- E2 的两档学习率、E3 的 G1/G2 各用一个配置文件 / `RUN_DIR`。
-- 注意：默认 frontier 评测集与 TRAIN 来源的训练题重叠（见 1.4），它只是“学进去没有”的门槛；结论以 VAL 为准。
-  需要留出集门槛时，用 `FRONTIER_PARTITION` 指向不含训练题的划分。
-- 已在 RTX 5090 上冒烟验证 `check → base → r1 → select → train → evalckpt → val`（约 1 小时），包括显式 TIS（日志出现 `rollout_corr/rollout_is_mean ≈ 0.997`）。
-  多卡 `TRAIN_GPUS` 尚未实测，请先冒烟。
-- `TRAIN_BATCH_SIZE × N_GENERATIONS` 必须是 agent loop worker 数（默认 16）的倍数，脚本会提前检查。
+- All results and summaries are appended to `$RUN_DIR/pipeline.log`; re-run a single stage with `FORCE=1`.
+- Use one config file / `RUN_DIR` per E2 learning rate and per E3 group (G1/G2).
+- Note: the default frontier evaluation set overlaps the TRAIN-derived training prompts (see 1.4); it is only a "did it learn anything" gate,
+  and conclusions come from VAL. For a held-out gate, point `FRONTIER_PARTITION` at a partition without the training tasks.
+- Smoke-tested on RTX 5090s: `check → base → r1 → select → train → evalckpt → val` (about 1 hour), including explicit TIS
+  (the log shows `rollout_corr/rollout_is_mean ≈ 0.997`). Multi-GPU `TRAIN_GPUS` has not been tested yet; run the smoke test first.
+- `TRAIN_BATCH_SIZE × N_GENERATIONS` must be a multiple of the number of agent-loop workers (16 by default); the script checks this up front.
 
-以下各小节是每一步的细节与判定规则。底层训练都是 `experiments/tau-2/09_phase1_opd_ablation.sh` 的组 `O`（GRPO，只用官方奖励）、`SKIP_EVAL=1`。
-`experiments/tau-2/scripts/r1_job.sh`、`r3_group.sh`、`r3_watchdog.sh` 是我们在原机器上的包装脚本（**路径与机器相关**），仅作参数参考。
+The subsections below give the details and decision rules for each step. Training underneath is always group `O` of
+`experiments/tau-2/09_phase1_opd_ablation.sh` (GRPO, official reward only) with `SKIP_EVAL=1`.
+`experiments/tau-2/scripts/r1_job.sh`, `r3_group.sh` and `r3_watchdog.sh` are our wrappers on the original machines
+(**paths are machine-specific**); use them only as a reference for argument combinations.
 
-### E0 复现基线（约 2 GPU 小时）
+### E0 Reproduce the baseline (about 2 GPU-hours)
 
-- 4B base 的 VAL（种子 300）与 frontier，应得到约 34% 与 58%（±3 点内算一致）。
-- 用 `08_phase0_eval_protocol.sh`（VAL）与 `scripts/chunked_collect.sh --bucket TRAIN --trials 8 --seed 2000 --agent-temperature 1.0 --user-temperature 0.0 --max-steps 40`
-  加 `TAU2_PARTITION_PATH=experiments/tau-2/data/partition_frontier_only.json`（frontier）。
-- 不一致时先查：用户模拟器是否为 Qwen3.5-4B、`enable_thinking` 是否关闭、tau2 提交是否一致。
+- 4B base on VAL (seed 300) and on the frontier should give about 34% and 58% (within ±3 pt counts as consistent).
+- Use `08_phase0_eval_protocol.sh` (VAL) and `scripts/chunked_collect.sh --bucket TRAIN --trials 8 --seed 2000 --agent-temperature 1.0 --user-temperature 0.0 --max-steps 40`
+  with `TAU2_PARTITION_PATH=experiments/tau-2/data/partition_frontier_only.json` (frontier).
+- If the numbers differ, check first: is the user simulator Qwen3.5-4B, is `enable_thinking` off, is the tau2 commit the same.
 
-### E1 R1 筛选（约 10–20 GPU 小时，可并行）
+### E1 R1 selection (about 10–20 GPU-hours, parallelizable)
 
-- 4B base 在 AReaL 有效任务（1,844）与 TRAIN（139）上每题采样 4 次（温度 1.0，40 步）：
-  `collect_traces --bucket AREAL|TRAIN --trials 4 --seed 4000 --agent-temperature 1.0 --user-temperature 0.0 --max-steps 40`（可用 `--shard i/n` 并行）。
-- 用 `scripts/select_frontier.py` 挑出 0 < p < 1 的任务，再用 `tau2_evolve.prepare_grpo_data --max-steps 40 --no-balance-domains` 生成 GRPO parquet。
-- 预期：AReaL 约 546 题、TRAIN 约 36 题（我们的结果；种子不同会有 ±10% 浮动）。
+- 4B base samples each valid AReaL task (1,844) and each TRAIN task (139) 4 times (temperature 1.0, 40 steps):
+  `collect_traces --bucket AREAL|TRAIN --trials 4 --seed 4000 --agent-temperature 1.0 --user-temperature 0.0 --max-steps 40` (parallelize with `--shard i/n`).
+- Pick tasks with 0 < p < 1 with `scripts/select_frontier.py`, then build the GRPO parquet with `tau2_evolve.prepare_grpo_data --max-steps 40 --no-balance-domains`.
+- Expected: about 546 AReaL tasks and about 36 TRAIN tasks (our result; ±10% with different seeds).
 
-### E2 GRPO 无截断（主实验，回答 Q1）
+### E2 GRPO without truncation (main experiment, answers Q1)
 
-| 项目 | 32 GB 上的旧设置 | 新设置 |
+| Item | Old setting on 32 GB | New setting |
 |---|---|---|
-| 回复上限（整段多轮） | 5632–6144 | **16384**（目标截断率 < 5%） |
-| prompt 上限 | 8192 | 8192 |
-| 最多轮数 `MAX_TURNS` | 30 | 30（若截断主要来自轮数，再提到 40） |
-| 每步题数 × 生成数 | 4 × 8 | **16 × 8**（或 8 × 16） |
-| 学习率 | 1e-5 → 3e-5 | 1e-5 与 3e-5 各一组 |
-| LoRA | rank 16，注意力 + MLP | 同左；另加一组 rank 64 或全参数（显存允许时） |
-| actor 精度 | `fsdp_config.model_dtype=bf16` | 80 GB 上可回到 fp32 |
-| 重要性采样修正 | VERL 一步异步默认 `bypass_mode=True`：old_log_prob 直接用 rollout 的 logprob，PPO 比率 π_θ/π_rollout 带裁剪（隐式修正，无显式 IS 权重） | **显式 TIS**：`bypass_mode=False`（decoupled，重算 old_log_prob）+ `rollout_is=token`、`rollout_is_threshold=2.0`、`calculate_log_probs=True`；pipeline 的 `ENABLE_TIS=1` 已包含这四项 |
-| 步数 / checkpoint | 250 / 每 50 | 200 / 每 25 |
+| Response cap (whole multi-turn conversation) | 5632–6144 | **16384** (target truncation rate < 5%) |
+| Prompt cap | 8192 | 8192 |
+| Max turns `MAX_TURNS` | 30 | 30 (raise to 40 if truncation mostly comes from the turn cap) |
+| Prompts × generations per step | 4 × 8 | **16 × 8** (or 8 × 16) |
+| Learning rate | 1e-5 → 3e-5 | one run each at 1e-5 and 3e-5 |
+| LoRA | rank 16, attention + MLP | same; plus one run with rank 64 or full fine-tuning (if memory allows) |
+| Actor precision | `fsdp_config.model_dtype=bf16` | fp32 is fine on 80 GB |
+| Importance-sampling correction | VERL one-step off-policy defaults to `bypass_mode=True`: old_log_prob is the rollout log-prob, and the PPO ratio π_θ/π_rollout is clipped (implicit correction, no explicit IS weights) | **Explicit TIS**: `bypass_mode=False` (decoupled, recomputes old_log_prob) + `rollout_is=token`, `rollout_is_threshold=2.0`, `calculate_log_probs=True`; the pipeline's `ENABLE_TIS=1` sets all four |
+| Steps / checkpoints | 250 / every 50 | 200 / every 25 |
 
-- GPU 布局（8 卡）：学生评测服务 + 用户模拟器 1 卡，训练 4 卡，rollout 3 卡，例如 `TRAIN_GPU=0,1,2,3 ROLLOUT_GPU=4,5,6`（`03_grpo_only.sh` 已支持逗号分隔多卡，**多卡尚未实测**，先跑 2 步冒烟）。
-- 关键环境变量（在 `09` 之外的部分）：`MAX_RESPONSE_LENGTH`、`TRAIN_BATCH_SIZE`、`N_GENERATIONS`、`ACTOR_LR`、`TOTAL_STEPS`、`SAVE_EVERY`、
-  `LORA_TARGET_MODULES`、`GRPO_PARQUET`、`EXTRA_TRAIN_ARGS`（追加 VERL 覆盖项）。
-- **每步必看的指标**（`group_O/train.log`）：
-  - `response_length/clip_ratio`（截断率，必须 < 5%）；
-  - `critic/score/mean` 的 25 步滑动平均（应上升）；
-  - `actor/pg_clipfrac`、`actor/ppo_kl`（过小说明几乎没更新，过大可能坍塌）；
-  - 每条 rollout 的重复工具调用（base 约 0.01；> 0.2 视为坍塌前兆）。
-- 判定：
-  - **通过**：某 checkpoint 的 frontier 比 4B base 高 ≥ 5 点且 CI 下界 > 0 → 进 VAL（种子 300 + 1300），再进第 7 节最终评测。
-  - **截断已 < 5% 但奖励仍平、frontier 不涨** → 转 E4。
-  - **出现坍塌**（重复调用上升、工具调用数下降）→ 回退上一个 checkpoint，学习率减半。
+- GPU layout (8 GPUs): 1 GPU for the student evaluation server + user simulator, 4 for training, 3 for rollout, e.g.
+  `TRAIN_GPU=0,1,2,3 ROLLOUT_GPU=4,5,6` (`03_grpo_only.sh` accepts comma-separated GPU lists; **multi-GPU is untested**, run a 2-step smoke test first).
+- Key environment variables (beyond those in `09`): `MAX_RESPONSE_LENGTH`, `TRAIN_BATCH_SIZE`, `N_GENERATIONS`, `ACTOR_LR`, `TOTAL_STEPS`, `SAVE_EVERY`,
+  `LORA_TARGET_MODULES`, `GRPO_PARQUET`, `EXTRA_TRAIN_ARGS` (extra VERL overrides).
+- **Metrics to watch every step** (`group_O/train.log`):
+  - `response_length/clip_ratio` (truncation rate, must be < 5%);
+  - 25-step moving average of `critic/score/mean` (should rise);
+  - `actor/pg_clipfrac`, `actor/ppo_kl` (too small means almost no update; too large may mean collapse);
+  - repeated tool calls per rollout (base about 0.01; > 0.2 is an early sign of collapse).
+- Decision rules:
+  - **Pass**: a checkpoint's frontier is ≥ 5 pt above the 4B base with CI lower bound > 0 → VAL (seeds 300 + 1300), then the final evaluation in Section 7.
+  - **Truncation already < 5% but reward flat and frontier not rising** → go to E4.
+  - **Collapse** (repeated calls rising, tool-call count falling) → roll back to the previous checkpoint and halve the learning rate.
 
-### E3 数据对照（回答 Q2，与 E2 同设置）
+### E3 Data comparison (answers Q2, same settings as E2)
 
-- G1（AReaL frontier + TRAIN frontier）对 G2（只用 TRAIN frontier）。G2 题量少（约 36 题），需注意过拟合，看 VAL 而非 frontier 下结论。
+- G1 (AReaL frontier + TRAIN frontier) vs G2 (TRAIN frontier only). G2 has few tasks (about 36), so watch for overfitting and
+  draw conclusions from VAL, not the frontier.
 
-### E4 信用分配（回答 Q3，仅当 E2 无效时做）
+### E4 Credit assignment (answers Q3; only if E2 fails)
 
-- **分轮次优势估计**：在中间回合分叉重采样，用蒙特卡洛估计每轮价值（可复用 `tau2_evolve/collect_error_points.py` 与 `turn_router.py` 的分叉/逐轮机制）。
-- **PPO + critic**：VERL 支持 GAE；critic 与学生同大小（4B），80 GB 上可行。
-- **过程奖励**（前期使用，后期退火到 0）：`TAU2_ACTION_RECALL_WEIGHT` 与 `TAU2_ACTION_RECALL_ANNEAL_ROLLOUTS` 已实现（动作召回率）。
-
----
-
-## 6. 评测流程
-
-- 训练出的 LoRA 若只覆盖注意力 + MLP，可由 vLLM 直接加载：`08_phase0_eval_protocol.sh` 的 `AGENT_ADAPTER` 会自动把 VERL 导出的
-  键名转换成 vLLM 需要的 `language_model` 形式，并**断言 adapter 确实生效**（与 base 的 logprob 不同），未生效直接报错。
-- 若 LoRA 覆盖了 GDN 投影（`in_proj_*`、`out_proj`），vLLM 的 LoRA 路径不完整，请用 `scripts/merge_lora_qwen35.py` 合并成完整 checkpoint 再评测。
-- VERL checkpoint → adapter：`python -m verl_code_rl.extract_sft_lora_adapter --checkpoint-dir <run>/group_O/verl/global_step_N/actor ...`。
-- 长时间运行的 Qwen3.5 vLLM 服务会进入 GDN“零吞吐”状态：评测一律走 `scripts/chunked_collect.sh`（每 128 个任务重启服务）。
-- 两个 vLLM 服务挤在一张卡上时需要 `VLLM_MAX_NUM_SEQS=128`（否则 Mamba 状态块不够，服务起不来）。
+- **Per-turn advantage estimates**: branch and resample at intermediate turns and estimate each turn's value by Monte Carlo
+  (the branching / per-turn machinery of `tau2_evolve/collect_error_points.py` and `turn_router.py` can be reused).
+- **PPO + critic**: VERL supports GAE; a critic the size of the student (4B) is feasible on 80 GB.
+- **Process reward** (early in training, annealed to 0 later): `TAU2_ACTION_RECALL_WEIGHT` and `TAU2_ACTION_RECALL_ANNEAL_ROLLOUTS` are implemented (action recall).
 
 ---
 
-## 7. 最终报告（Q4）
+## 6. Evaluation workflow
 
-- 在 EVAL 上用托管强模型做用户模拟器（`COMMONSTACK_API_KEY` 或其他 OpenAI 兼容端点），报告 4B base 与最佳 checkpoint 的 pass^1、pass^4 与 95% CI，种子 300 + 1300。
-- EVAL 在此之前不得用于任何选择。
+- A trained LoRA that covers only attention + MLP can be loaded by vLLM directly: `AGENT_ADAPTER` in `08_phase0_eval_protocol.sh`
+  converts VERL's exported key names to the `language_model` form vLLM needs, and **asserts that the adapter is actually active**
+  (log-probs differ from base); it fails loudly otherwise.
+- If the LoRA covers GDN projections (`in_proj_*`, `out_proj`), vLLM's LoRA path is incomplete: merge it into a full checkpoint with
+  `scripts/merge_lora_qwen35.py` before evaluating.
+- VERL checkpoint → adapter: `python -m verl_code_rl.extract_sft_lora_adapter --checkpoint-dir <run>/group_O/verl/global_step_N/actor ...`.
+- Long-running Qwen3.5 vLLM servers drift into a GDN "zero-throughput" state: always evaluate through `scripts/chunked_collect.sh`
+  (restarts the servers every 128 tasks).
+- Two vLLM servers on one GPU need `VLLM_MAX_NUM_SEQS=128` (otherwise there are not enough Mamba state blocks and the server does not start).
 
 ---
 
-## 8. 踩过的坑（都已修复，换环境时注意）
+## 7. Final report (Q4)
 
-| 问题 | 现象 | 处理 |
+- On EVAL, with a hosted strong model as the user simulator (`COMMONSTACK_API_KEY` or another OpenAI-compatible endpoint), report pass^1,
+  pass^4 and 95% CIs for the 4B base and the best checkpoint, seeds 300 + 1300.
+- EVAL must not be used for any selection before that.
+
+---
+
+## 8. Pitfalls we hit (all fixed; watch for them in a new environment)
+
+| Problem | Symptom | Fix |
 |---|---|---|
-| vLLM 静默忽略 VERL 导出的 Qwen3.5 LoRA | 输出与 base 完全相同 | 评测前转换键名，并断言 logprob 有差异 |
-| 训练用 JSON 工具格式、评测用 Qwen3.5 原生 XML | 训练学到的用不上 | 训练改为原生协议（`TOOL_FORMAT=qwen3_coder`），`check_native_alignment.py` 校验 |
-| LoRA 只挂 q/k/v/o | Qwen3.5 混合结构下只训到 6/24 层 | 默认加上 MLP |
-| 注入的老师消息沿用旧时间戳 | tau2 按时间排序后顺序错乱，评测报 “Tool message expected” | 注入时重置时间戳 |
-| telecom 用户自己的工具调用混进 agent 历史 | tau2 拒绝该历史；SFT 数据出现空消息 | 按 tau2 的 `is_valid_agent_history_message` 过滤 |
-| 缺 `causal-conv1d` | GDN 退回 torch 实现，SFT 慢 2.5 倍 | 从源码编译（CUDA 11.8 / 12.x 均可） |
-| actor 默认 fp32 | 4B 在 32 GB 上更新时 OOM | `fsdp_config.model_dtype=bf16` |
-| 权重同步缓冲块小于最大张量 | 同步时报错 | `CHECKPOINT_BUCKET_MB` 要大于词表 embedding（4B bf16 约 1.27 GB） |
-| 长度上限压太低 | 24–40% 对话被截断、奖励记 0 | 本次交接的核心问题，见 E2 |
-| 以为加了 `rollout_is` 就开了 TIS | one-step off-policy 默认 `bypass_mode=True`，此时 `rollout_is` 权重被忽略（配置照样接受、不报错） | 同时设 `algorithm.rollout_correction.bypass_mode=False`；日志里确认 `rollout_corr/*` 指标出现 |
+| vLLM silently ignores Qwen3.5 LoRAs exported by VERL | Output identical to base | Convert key names before evaluation and assert that log-probs differ |
+| Training used JSON tool format, evaluation uses Qwen3.5's native XML | What training learned is not used | Train with the native protocol (`TOOL_FORMAT=qwen3_coder`), checked by `check_native_alignment.py` |
+| LoRA only on q/k/v/o | Under Qwen3.5's hybrid architecture only 6/24 layers are trained | MLP added by default |
+| Injected teacher messages kept old timestamps | tau2 sorts by time and the order breaks; evaluation fails with "Tool message expected" | Reset the timestamp on injection |
+| Telecom users' own tool calls mixed into the agent history | tau2 rejects the history; SFT data gets empty messages | Filter with tau2's `is_valid_agent_history_message` |
+| Missing `causal-conv1d` | GDN falls back to torch; SFT 2.5× slower | Install the prebuilt wheel or build from source (works with CUDA 11.8 / 12.x) |
+| Actor defaults to fp32 | 4B OOMs during the update on 32 GB | `fsdp_config.model_dtype=bf16` |
+| Weight-sync bucket smaller than the largest tensor | Error during sync | `CHECKPOINT_BUCKET_MB` must exceed the vocabulary embedding (about 1.27 GB for 4B bf16) |
+| Length cap too low | 24–40% of conversations truncated and scored 0 | The core issue of this handoff; see E2 |
+| Assuming `rollout_is` alone turns on TIS | One-step off-policy defaults to `bypass_mode=True`, where `rollout_is` weights are ignored (the config is accepted without any error) | Also set `algorithm.rollout_correction.bypass_mode=False`; confirm `rollout_corr/*` metrics appear in the log |
 
 ---
 
-## 9. 代码地图
+## 9. Code map
 
-| 路径 | 作用 |
+| Path | Purpose |
 |---|---|
-| `experiments/tau-2/10_4b_rl_pipeline.sh`、`config/pipeline_4b_rl.env.example` | 一键流程（第 5.0 节） |
-| `experiments/tau-2/scripts/compare_tasks.py` | 两份多次试验结果的逐题配对比较与过线判定 |
-| `experiments/tau-2/08_phase0_eval_protocol.sh` | 评测协议（起服务、adapter 断言、分块采集、统计） |
-| `experiments/tau-2/09_phase1_opd_ablation.sh` | 训练入口；组 `O` = GRPO 官方奖励；`EXTRA_TRAIN_ARGS`、`SKIP_EVAL` |
-| `experiments/tau-2/03_grpo_only.sh`、`scripts/train_verl_grpo.sh` | VERL GRPO 启动（支持多卡列表） |
-| `experiments/tau-2/scripts/chunked_collect.sh` | 分块采集（规避 GDN 卡死） |
-| `experiments/tau-2/tau2_evolve/collect_traces.py` | 采样；`--bucket AREAL`、`--shard`、`--trials`、`--turn-router` |
-| `experiments/tau-2/tau2_evolve/areal_tasks.py` | AReaL 任务加载与按任务数据库 |
-| `experiments/tau-2/tau2_evolve/eval_stats.py` | pass^k、配对 bootstrap、McNemar |
-| `experiments/tau-2/tau2_evolve/frontier.py`、`scripts/select_frontier.py` | frontier 划分与 GRPO 选题 |
-| `experiments/tau-2/tau2_evolve/prepare_grpo_data.py` | GRPO parquet（原生协议） |
-| `experiments/tau-2/tau2_evolve/collect_error_points.py`、`turn_router.py` | 出错点、逐轮路由（E4 可复用） |
-| `experiments/tau-2/scripts/check_areal_tasks.py` | AReaL 任务回放校验 |
-| `experiments/tau-2/scripts/merge_lora_qwen35.py` | 含 GDN 投影的 LoRA 合并 |
-| `experiments/tau-2/PLAN_4B_A800.md`、`PLAN_4B_RL.md` | 上一阶段的计划与逐步调整记录 |
+| `experiments/tau-2/SETUP_4B_RL.md`, `scripts/setup_envs.sh`, `scripts/download_assets.sh` | Environments, models and data from scratch (AWS) |
+| `experiments/tau-2/10_4b_rl_pipeline.sh`, `config/pipeline_4b_rl.env.example` | One-command workflow (Section 5.0) |
+| `experiments/tau-2/scripts/compare_tasks.py` | Per-task paired comparison of two multi-trial runs and the pass-the-bar decision |
+| `experiments/tau-2/08_phase0_eval_protocol.sh` | Evaluation protocol (servers, adapter assertion, chunked collection, statistics) |
+| `experiments/tau-2/09_phase1_opd_ablation.sh` | Training entry point; group `O` = GRPO with the official reward; `EXTRA_TRAIN_ARGS`, `SKIP_EVAL` |
+| `experiments/tau-2/03_grpo_only.sh`, `scripts/train_verl_grpo.sh` | VERL GRPO launch (accepts multi-GPU lists) |
+| `experiments/tau-2/scripts/chunked_collect.sh` | Chunked collection (avoids the GDN stall) |
+| `experiments/tau-2/tau2_evolve/collect_traces.py` | Sampling; `--bucket AREAL`, `--shard`, `--trials`, `--turn-router` |
+| `experiments/tau-2/tau2_evolve/areal_tasks.py` | AReaL task loading and per-task databases |
+| `experiments/tau-2/tau2_evolve/eval_stats.py` | pass^k, paired bootstrap, McNemar |
+| `experiments/tau-2/tau2_evolve/frontier.py`, `scripts/select_frontier.py` | Frontier split and GRPO prompt selection |
+| `experiments/tau-2/tau2_evolve/prepare_grpo_data.py` | GRPO parquet (native protocol) |
+| `experiments/tau-2/tau2_evolve/collect_error_points.py`, `turn_router.py` | Error points, per-turn routing (reusable for E4) |
+| `experiments/tau-2/scripts/check_areal_tasks.py` | AReaL task replay check |
+| `experiments/tau-2/scripts/merge_lora_qwen35.py` | Merging LoRAs that include GDN projections |
+| `experiments/tau-2/PLAN_4B_A800.md`, `PLAN_4B_RL.md` | Plans of the previous phase and their step-by-step adjustment log |
 
 ---
 
-## 10. 时间与算力估算（8 × 80 GB）
+## 10. Time and compute estimates (8 × 80 GB)
 
-| 步骤 | 估算 |
+| Step | Estimate |
 |---|---|
-| 环境 + 数据（E0 前置） | 0.5–1 天 |
-| E0 基线复现 | 约 2 GPU 小时 |
-| E1 R1 筛选 | 10–20 GPU 小时（并行后数小时） |
-| E2 两组 GRPO × 200 步 | 每组约 1 天（4 训练卡 + 3 rollout 卡）；每个 checkpoint 的 frontier 评测约 1–2 GPU 小时 |
-| E3 | 与 E2 同时 |
-| E4（若需要） | 2–3 天 |
-| 最终 VAL / EVAL | 半天（EVAL 需 API 预算） |
+| Environments + data (before E0) | about 1 hour (`SETUP_4B_RL.md`) |
+| E0 baseline reproduction | about 2 GPU-hours |
+| E1 R1 selection | 10–20 GPU-hours (a few hours in parallel) |
+| E2 two GRPO runs × 200 steps | about 1 day per run (4 training + 3 rollout GPUs); frontier evaluation about 1–2 GPU-hours per checkpoint |
+| E3 | concurrent with E2 |
+| E4 (if needed) | 2–3 days |
+| Final VAL / EVAL | half a day (EVAL needs API budget) |
 
-## 11. 约定
+## 11. Conventions
 
-- `RESULTS_DIR` 一次一配置，不在已有目录里混跑不同设置；续跑在原目录内进行。
-- 不在 VAL/EVAL 上训练，不用 EVAL 结果做任何选择。
-- 所有结论在重新加载（或合并）adapter 之后再下；评测必须通过 adapter 生效断言。
-- `.env`、API key、模型权重、`results/` 不进仓库。
+- One configuration per `RESULTS_DIR`; never mix settings in an existing directory; resume inside the original directory.
+- Never train on VAL/EVAL, and never use EVAL results for any selection.
+- Draw conclusions only after reloading (or merging) the adapter; every evaluation must pass the adapter-active assertion.
+- `.env`, API keys, model weights and `results/` stay out of the repository.
