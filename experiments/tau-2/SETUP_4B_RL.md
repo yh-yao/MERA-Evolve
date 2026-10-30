@@ -87,7 +87,7 @@ S3_CACHE=s3://your-bucket/mera-tau2 bash experiments/tau-2/scripts/download_asse
 
 - `Qwen/Qwen3.5-4B`: the student and the user simulator share these weights. Every baseline number in the docs uses the 4B user simulator.
 - `inclusionAI/AReaL-tau2-data` (Apache-2.0): `tau2_rl_train.jsonl` (1,982 RL tasks) + `tau2_rl_database/` (9 database snapshots).
-  The first run of the pipeline's `check` stage replays the gold actions and writes `valid_task_ids.json` (CPU, about 10 minutes; 1,844 valid tasks expected).
+  The first run of the pipeline's `check` stage replays the gold actions and writes `valid_task_ids.json` (CPU, about 40 minutes; 1,844 valid tasks expected).
   With the S3 cache, run `aws s3 sync $AREAL_DIR s3://.../data/areal_tau2` after `check` to store that file as well.
 - Downloads resume; the script finally checks that all weight shards are present and that the task count is right.
   The download tool (`hf`) runs through `uvx`, so no environment has to exist first.

@@ -96,7 +96,7 @@ stage_check() {
   if [[ "$USE_AREAL" == 1 ]]; then
     [[ -s "$MERA_AREAL_DIR/tau2_rl_train.jsonl" ]] || die "MERA_AREAL_DIR has no tau2_rl_train.jsonl"
     if [[ ! -s "$MERA_AREAL_DIR/valid_task_ids.json" ]]; then
-      log "check: replaying AReaL gold actions to build valid_task_ids.json (CPU, ~10 min)"
+      log "check: replaying AReaL gold actions to build valid_task_ids.json (CPU, ~40 min)"
       "$TAU2_PY" "$SCRIPT_DIR/scripts/check_areal_tasks.py" --write-valid "$MERA_AREAL_DIR/valid_task_ids.json" \
         > "$RUN_DIR/check_areal.log" 2>&1 || die "check_areal_tasks failed (see check_areal.log)"
     fi

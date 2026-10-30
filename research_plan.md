@@ -116,7 +116,7 @@ Takeaways: 4B already matches the 27B teacher, so "teach 4B with 27B" has no mea
 
 ---
 
-## 4. Data preparation (about 1 hour, mostly CPU)
+## 4. Data preparation (about 1 hour, mostly CPU; the replay check alone takes ~40 minutes)
 
 1. tau2-bench is pinned at commit `17e07b1da2bbc0cadfddeea36412686e0604127b` (see `CLAUDE.md`).
 2. AReaL data: `inclusionAI/AReaL-tau2-data` (Apache-2.0, on both Hugging Face and ModelScope); download it with
