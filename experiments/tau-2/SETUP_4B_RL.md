@@ -15,6 +15,21 @@ Everything uses official sources by default (PyPI, download.pytorch.org, GitHub,
 
 The machine must be able to download `zeyuyuyu/router-skills-evolve` (the tau2 workspace) from GitHub.
 
+### 8 × A800 80 GB in China (the target machine of the next phase)
+
+Everything below applies unchanged, with three differences:
+- **Driver**: check `nvidia-smi` first. Driver ≥ 580 is required (training needs ≥ 570, the vLLM 0.29 evaluation
+  servers need ≥ 580). With an older driver (e.g. 515 / CUDA 11.7) only SFT works; GRPO, evaluation and the E6
+  teacher cannot run.
+- **Sources**: run `MIRROR=cn bash experiments/tau-2/scripts/setup_envs.sh` (Aliyun PyPI and PyTorch wheels, Tsinghua
+  conda-forge, ghfast.top for GitHub) and `SOURCE=modelscope ... download_assets.sh` (Qwen3.5-4B, AReaL-tau2-data and
+  AReaL-SEA-235B-A22B are all on ModelScope). The S3 cache is AWS-only; skip it.
+- **No internet on the GPU node**: run both scripts on a machine with internet and the same OS/Python, then copy the
+  repository (with `.venv_*`, `.deps/`), `router-skills-evolve/`, the models and the data to the GPU node at the same
+  absolute paths (the venvs contain absolute paths). Then run `10_4b_rl_pipeline.sh my.env check` on the GPU node.
+- **FP8 on A800**: Ampere has no FP8 tensor cores; FP8 is weight-only there (halves memory, not faster). See
+  `research_plan.md` E6 for serving the 235B teacher.
+
 Directory layout (script defaults; each can be changed with an environment variable):
 
 ```text
