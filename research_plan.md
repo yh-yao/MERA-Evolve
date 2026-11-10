@@ -18,6 +18,9 @@ G2, trained only on TRAIN tasks, had two checkpoints pass the bar (+5.4 / +5.6 p
 **The main suspect is the length cap forced by GPU memory: about 30% of training conversations were truncated and scored 0.**
 The core of the next phase is to remove truncation and enlarge the batch on large-memory GPUs, then re-test GRPO.
 The whole workflow is a one-command script, `experiments/tau-2/10_4b_rl_pipeline.sh` (Section 5.0).
+A second open problem is **teacher headroom**: our local 27B teacher is no better than the 4B student on VAL. Two new
+experiments address it without an API budget — gold-action-guided self-rollouts (E5) and a strong open-weight teacher,
+AReaL-SEA-235B-A22B, served locally (E6).
 
 ---
 
@@ -99,6 +102,10 @@ Takeaways: 4B already matches the 27B teacher, so "teach 4B with 27B" has no mea
 2. **Q2**: do the AReaL synthetic tasks (G1) add anything over the official TRAIN tasks alone (G2)?
 3. **Q3**: if Q1 is no, is the problem credit assignment (long conversations, terminal reward only)? Test with PPO + critic or per-turn advantage estimates.
 4. **Q4**: report the 4B base and the best model on EVAL with a hosted user simulator.
+5. **Q5 (teacher headroom)**: for tasks the student never solves (p = 0, so GRPO gets no signal), can demonstrations that
+   stay in the real tau2 distribution help — first from the tasks' own gold actions (E5), then from a much stronger
+   open-weight teacher served locally (E6)? Earlier attempts failed for two separate reasons: the local 27B teacher was no
+   stronger than 4B, and AReaL's Claude-written SFT dialogues were strong but off-distribution (synthetic DBs and style).
 
 ---
 
@@ -225,6 +232,84 @@ The subsections below give the details and decision rules for each step. Trainin
   (the branching / per-turn machinery of `tau2_evolve/collect_error_points.py` and `turn_router.py` can be reused).
 - **PPO + critic**: VERL supports GAE; a critic the size of the student (4B) is feasible on 80 GB.
 - **Process reward** (early in training, annealed to 0 later): `TAU2_ACTION_RECALL_WEIGHT` and `TAU2_ACTION_RECALL_ANNEAL_ROLLOUTS` are implemented (action recall).
+  This is the cheapest E4 arm: it uses the tasks' gold actions as partial credit, needs no teacher and no new code
+  (group `O` sets the weight to 0; the training script's default is 0.5). Try it first.
+
+### What the gold "answers" can and cannot do
+
+Every official tau2 task and every AReaL RL task ships evaluation criteria: the gold tool calls (name + arguments) and the
+expected final database state. They are **not** full trajectories. They do not show how to obtain the IDs from the user,
+when to verify identity, when to ask for explicit confirmation before a write, when policy requires refusing (the correct
+action is then "change nothing"), or what to say. The user simulator's messages also differ from run to run, so a bare
+action list cannot be used as SFT data. What the gold answers already do:
+
+| Use | Where | Needs a teacher? |
+|---|---|---|
+| Outcome reward (final DB state = official tau2 verdict) | GRPO, every experiment | No |
+| Partial credit (action recall) | E4 process reward | No |
+| Hints for generating correct trajectories in the real environment | **E5 (new)** | No |
+
+Their limit: a reward cannot teach a task the student never solves (p = 0 gives no GRPO signal), and hints cannot show the
+conversational behaviour the student gets wrong. That is what a strong teacher adds (E6).
+
+### E5 Gold-action-guided self-rollouts (answers Q5 without a teacher; needs new code)
+
+- **Idea**: the 4B student talks to the user simulator in the real tau2 environment as usual, but before each agent turn it
+  receives a hidden hint with the next gold action (e.g. `next: update_reservation_flights(reservation_id=..., ...)`).
+  The student writes all language itself. Keep only rollouts that the official evaluator passes, **remove the hints**, and
+  train on what remains (SFT with loss on the student's turns, or add them as positive samples next to GRPO groups).
+- **Why it might work where AReaL SFT failed**: the demonstrations are in the real tau2 distribution (real DBs, real user
+  simulator) and in the student's own style, so there is no style shift.
+- **Targets**: TRAIN and valid AReaL tasks with p = 0 or low p in R1 (E1 already measures p per task).
+- **Implementation (not written yet)**: an agent wrapper that inserts the hint into the system or last user message;
+  reuse the per-turn injection machinery of `tau2_evolve/turn_router.py` / `_FirstMessageAgent` in `benchmark.py`.
+  Read actions (lookups) can be hinted as well; tasks whose gold actions are only writes need the IDs from earlier turns.
+- **Risk**: the trained model never sees the hint, so it may learn the surface of correct trajectories without the cue that
+  triggered them. Measure on VAL; also compare against a "hints at train time, hint dropout 50%" variant.
+- **Pass**: VAL improves over the E2 best (or over base if E2 failed), and p rises on the targeted p = 0 tasks in a
+  held-out subset of them.
+
+### E6 Strong open-weight teacher: AReaL-SEA-235B-A22B (answers Q5; no API)
+
+- **Model**: `inclusionAI/AReaL-SEA-235B-A22B` on Hugging Face (Apache-2.0, not gated; MoE with 235B total / 22B active
+  parameters, fine-tuned from Qwen3-235B-A22B-Thinking-2507 on AReaL-tau2-data). The model card reports tau2 pass^1 of
+  81.3% on average (airline 71.0 / retail 79.0 / telecom 93.0) with GPT-4.1 as user simulator. Those numbers are not
+  comparable to ours (different user simulator and split), but the gap to our 4B (VAL 34.0%, telecom near 0) is large.
+- **Serving** (vLLM ≥ 0.29, TP = 8 on one 8 × 80 GB node, `--reasoning-parser qwen3` so the thinking stays out of `content`):
+  - bf16 weights are about 470 GB: they fit on 640 GB but leave only ~100 GB for KV cache (~15 concurrent 32k sequences;
+    Qwen3-235B KV is about 190 KB per token in bf16).
+  - **Recommended: FP8 weights** (~235 GB), leaving ~330 GB for KV (~50 concurrent 32k sequences). Prefer an offline
+    block-wise FP8 checkpoint (128 × 128 blocks, the format of Qwen's own FP8 releases; e.g. made with llm-compressor) over
+    vLLM's on-the-fly per-tensor `--quantization fp8`. Keep the KV cache in bf16 unless concurrency is the bottleneck
+    (`--kv-cache-dtype fp8` doubles it again).
+  - H100 runs FP8 natively (less memory and faster). A100/A800 have no FP8 tensor cores: vLLM falls back to weight-only
+    FP8, which still halves the weight memory but is not faster.
+- **Step 0 — qualify the teacher before using it** (lesson from the 27B teacher):
+  1. Frontier (58 × 8) and VAL seed 300 with our 4B user simulator, FP8 version. Required: clearly above the 4B student
+     (target ≥ +15 pt on VAL), with telecom no longer near 0.
+  2. FP8 vs bf16 on the frontier (paired, `compare_tasks.py`): we only need FP8 to stay far above the student, not to
+     match bf16 exactly. If FP8 drops by more than ~5 pt, use bf16 at lower concurrency.
+  If step 0 fails, stop E6: a teacher that is not much stronger than the student cannot teach it.
+- **Uses** (all in the real tau2 environment, all through existing code):
+  - Error-point correction: `tau2_evolve/collect_error_points.py --teacher-model ... --teacher-base-url ...` on the student's
+    failed TRAIN / AReaL rollouts, then `error_points_to_sft.py` (with `--rehearsal-traces` and `--correction-repeat`).
+  - Full demonstrations on p = 0 tasks: `collect_traces` with the teacher as agent (`--agent-base-url`, thinking on,
+    reasoning stripped by the parser) and keep passing rollouts as SFT data, as in the Phase 1 OPD groups.
+  - Optional: as a stronger local user simulator for internal comparisons. Published comparisons still need GPT-4.1.
+- **Pass**: same rule as E2 (frontier gate, then VAL with seeds 300 + 1300), compared against the best E2/E5 model.
+
+### Decision flow
+
+```text
+E0 baseline ─► E1 R1 selection ─► E2 GRPO without truncation (+ E3 data comparison in parallel)
+                                    │
+             VAL improves ◄─────────┤ (frontier gate passed, VAL up)  → final report (Section 7)
+                                    │
+             truncation < 5% but flat ──► E4 process reward (cheapest) ─► PPO + critic / per-turn advantages
+                                    │
+             many p = 0 tasks remain ──► E5 gold-guided self-rollouts ─► E6 strong local teacher
+                                                                          (E6 step 0 can run early, alongside E0)
+```
 
 ---
 
@@ -247,6 +332,8 @@ The subsections below give the details and decision rules for each step. Trainin
 - On EVAL, with a hosted strong model as the user simulator (`COMMONSTACK_API_KEY` or another OpenAI-compatible endpoint), report pass^1,
   pass^4 and 95% CIs for the 4B base and the best checkpoint, seeds 300 + 1300.
 - EVAL must not be used for any selection before that.
+- **API budget**: this is the only step that needs one. E0–E6 run entirely on local models. The final EVAL calls a hosted
+  model only for the user side: 67 tasks × 4 trials × 2 seeds ≈ 536 conversations per model reported, run once.
 
 ---
 
@@ -286,6 +373,8 @@ The subsections below give the details and decision rules for each step. Trainin
 | `experiments/tau-2/tau2_evolve/collect_error_points.py`, `turn_router.py` | Error points, per-turn routing (reusable for E4) |
 | `experiments/tau-2/scripts/check_areal_tasks.py` | AReaL task replay check |
 | `experiments/tau-2/scripts/merge_lora_qwen35.py` | Merging LoRAs that include GDN projections |
+| `experiments/tau-2/tau2_evolve/agent_loop.py` | GRPO reward, including the action-recall process reward (`TAU2_ACTION_RECALL_*`, E4) |
+| `experiments/tau-2/tau2_evolve/error_points_to_sft.py` | Teacher corrections → SFT parquet (E6) |
 | `experiments/tau-2/PLAN_4B_A800.md`, `PLAN_4B_RL.md` | Plans of the previous phase and their step-by-step adjustment log |
 
 ---
@@ -299,12 +388,18 @@ The subsections below give the details and decision rules for each step. Trainin
 | E1 R1 selection | 10–20 GPU-hours (a few hours in parallel) |
 | E2 two GRPO runs × 200 steps | about 1 day per run (4 training + 3 rollout GPUs); frontier evaluation about 1–2 GPU-hours per checkpoint |
 | E3 | concurrent with E2 |
-| E4 (if needed) | 2–3 days |
+| E4 (if needed) | 2–3 days; the process-reward arm is one extra GRPO run |
+| E5 (if needed) | ~1 day of code for the hint wrapper, then a few GPU-hours of guided rollouts + one SFT/GRPO run |
+| E6 step 0 (teacher qualification) | download 470 GB + FP8 conversion; frontier + VAL eval on one 8 × 80 GB node, ~half a day |
+| E6 (if step 0 passes) | teacher rollouts on p = 0 tasks occupy the whole node; ~1 day, then SFT + evaluation |
 | Final VAL / EVAL | half a day (EVAL needs API budget) |
 
 ## 11. Conventions
 
 - One configuration per `RESULTS_DIR`; never mix settings in an existing directory; resume inside the original directory.
 - Never train on VAL/EVAL, and never use EVAL results for any selection.
+- **No outside trajectories on official tau2 tasks.** Public tau2 leaderboard submissions and similar logs cover the
+  official tasks, i.e. our VAL and EVAL. Training on them leaks the test set. Only TRAIN-task trajectories and AReaL
+  synthetic tasks may be used; generate teacher data yourself (E5/E6).
 - Draw conclusions only after reloading (or merging) the adapter; every evaluation must pass the adapter-active assertion.
 - `.env`, API keys, model weights and `results/` stay out of the repository.

@@ -75,6 +75,7 @@ PYTHONPATH=experiments/tau-2/compat ../router-skills-evolve/.venv_tau2/bin/pytho
 export MODELS_DIR=/opt/dlami/nvme/work/models AREAL_DIR=/opt/dlami/nvme/work/data/areal_tau2
 bash experiments/tau-2/scripts/download_assets.sh            # Qwen3.5-4B + AReaL-tau2-data (Hugging Face)
 bash experiments/tau-2/scripts/download_assets.sh teacher    # optional: Qwen3.8-27B (teacher / upper bound, about 55 GB)
+bash experiments/tau-2/scripts/download_assets.sh sea        # optional: AReaL-SEA-235B-A22B (E6 teacher, about 470 GB; see research_plan.md E6)
 ```
 
 For several instances, or instances you restart often, add the S3 cache: the first machine downloads from Hugging Face and uploads

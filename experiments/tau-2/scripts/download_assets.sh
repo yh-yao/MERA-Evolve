@@ -6,6 +6,7 @@
 #   models   Qwen/Qwen3.5-4B                -> $MODELS_DIR/Qwen3.5-4B   (student and user simulator, ~9 GB)
 #   areal    inclusionAI/AReaL-tau2-data    -> $AREAL_DIR               (tau2_rl_train.jsonl + tau2_rl_database/, ~1 GB)
 #   teacher  Qwen/Qwen3.8-27B (optional)    -> $MODELS_DIR/Qwen3.8-27B  (only for teacher / upper-bound runs, ~55 GB)
+#   sea      inclusionAI/AReaL-SEA-235B-A22B (optional) -> $MODELS_DIR/AReaL-SEA-235B-A22B  (E6 strong teacher, ~470 GB bf16)
 # Default: models areal.
 #
 # SOURCE=hf (default) downloads from the Hugging Face Hub; SOURCE=modelscope only for machines inside China.
@@ -80,6 +81,7 @@ for s in "${STEPS[@]}"; do
   case "$s" in
     models) get_model Qwen/Qwen3.5-4B Qwen3.5-4B ;;
     teacher) get_model Qwen/Qwen3.8-27B Qwen3.8-27B ;;
+    sea) get_model inclusionAI/AReaL-SEA-235B-A22B AReaL-SEA-235B-A22B ;;
     areal) get_areal ;;
     *) log "unknown step $s"; exit 1 ;;
   esac
