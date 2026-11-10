@@ -17,6 +17,8 @@ G2, trained only on TRAIN tasks, had two checkpoints pass the bar (+5.4 / +5.6 p
 (not significant): the gain did not transfer (see 1.4).
 **The main suspect is the length cap forced by GPU memory: about 30% of training conversations were truncated and scored 0.**
 One component of the next phase is to remove truncation and enlarge the batch on large-memory GPUs, then re-test GRPO.
+Training infrastructure is also an explicit optimization target: profile rollout, user simulation, actor updates and weight
+sync, then improve memory use and end-to-end throughput with the same model checkpoints and evaluation protocol (Section I).
 The whole workflow is a one-command script, `experiments/tau-2/10_4b_rl_pipeline.sh` (Section 5.0).
 A second open problem is **teacher headroom**: our local 27B teacher is no better than the 4B student on VAL. The next
 phase therefore **teaches the student with a strong open-weight teacher, AReaL-SEA-235B-A22B, served locally on the
@@ -46,8 +48,11 @@ E0–E6 are prerequisites and components of that loop.
   Much more sensitive than VAL (about 5 pt is visible); used to tell whether training learned anything at all. The 58 tasks are fixed in
   `experiments/tau-2/data/partition_frontier_only.json` (retail 30 / airline 22 / telecom 6, in the TRAIN bucket);
   point `TAU2_PARTITION_PATH` at it for evaluation. They come from `tau2_evolve/frontier.py` bucketing 8 samples of the 2B base.
-- User simulator for training and for every number in this document: local **Qwen3.5-4B**. The final EVAL is planned with a hosted
-  strong model as the user simulator (needs an API key; not done yet).
+- User simulator for training, TRAIN diagnostics, VAL and final EVAL: the same local **Qwen3.5-4B base checkpoint**, frozen
+  throughout all cycles and ablations. Never attach the student's trained adapter or SkillBook to the user simulator.
+  Pin its model/tokenizer revision, chat template, thinking setting and serving configuration. Keep the stage-specific
+  decoding protocol above (VAL/EVAL user temperature 0.7; frontier/R1 user temperature 0); compare policies under the
+  same protocol and seeds. Final EVAL does not switch to a hosted model.
 
 ### 1.2 Reference numbers
 
@@ -113,7 +118,7 @@ Takeaways: 4B already matches the 27B teacher, so "teach 4B with 27B" has no mea
    (≥ +5 pt with CI lower bound > 0), and does it transfer to VAL?
 2. **Q2**: do the AReaL synthetic tasks (G1) add anything over the official TRAIN tasks alone (G2)?
 3. **Q3**: if Q1 is no, is the problem credit assignment (long conversations, terminal reward only)? Test with PPO + critic or per-turn advantage estimates.
-4. **Q4**: report the 4B base and the best model on EVAL with a hosted user simulator.
+4. **Q4**: report the 4B base and the best model on EVAL with the same frozen local Qwen3.5-4B user simulator as VAL.
 5. **Q5 (teacher headroom)**: does a much stronger teacher (AReaL-SEA-235B, served locally) teach the 4B student what GRPO
    alone cannot — especially the tasks it never solves (p = 0, so GRPO gets no signal) — when its corrections and
    demonstrations are generated in the real tau2 environment (E6)? Teacher-free fallback: the tasks' own gold actions (E5). Earlier attempts failed for two separate reasons: the local 27B teacher was no
@@ -131,7 +136,9 @@ Takeaways: 4B already matches the 27B teacher, so "teach 4B with 27B" has no mea
   are built by `setup_envs.sh` (background in the comments of `requirements-qwen35-cu129.txt`); tau2 runs in its own venv (`TAU2_WORKSPACE`).
 - Qwen3.5's GDN layers **must use the fast path**: this needs `flash-linear-attention` and `causal-conv1d`. Without `causal-conv1d`,
   transformers silently falls back to a pure-torch implementation (training 2.5× slower or worse); search the logs for "fast path is not available".
-- Models: Qwen3.5-4B (student and user simulator); optionally Qwen3.8-27B (teacher / upper-bound reference).
+- Models: Qwen3.5-4B (student base and frozen user simulator), AReaL-SEA-235B-A22B (strong teacher, subject to E6 step 0);
+  optionally Qwen3.8-27B as the earlier teacher reference. Infra comparisons keep these checkpoints fixed; changing
+  model size or swapping the user simulator is a separate experiment.
 
 ---
 
@@ -274,6 +281,52 @@ The subsections below give the details and decision rules for each step. Trainin
 - Pick tasks with 0 < p < 1 with `scripts/select_frontier.py`, then build the GRPO parquet with `tau2_evolve.prepare_grpo_data --max-steps 40 --no-balance-domains`.
 - Expected: about 546 AReaL tasks and about 36 TRAIN tasks (our result; ±10% with different seeds).
 
+### I. Training infrastructure optimization (before full E2 runs and M student updates)
+
+**Goal.** Make the existing 4B training stack produce more complete, usable trajectories per GPU-hour and finish updates
+faster. Larger-memory GPUs are an opportunity to optimize the infrastructure, not a reason to retain the 32 GB layout
+or switch the actor to fp32. This stage is planned work; multi-GPU training and the gains below are not yet validated.
+
+1. **Establish a profile.** After the 2-step plumbing smoke test, use a fixed TRAIN-only workload for a short warmed-up
+   benchmark (e.g. 10–20 steps). Record rollout and user-simulator latency (median / p95), actor forward/backward and
+   log-prob time, weight-sync time, checkpoint time, GPU utilization and peak memory per role. Report wall time and
+   total allocated GPU-hours, including serving GPUs. Count complete valid trajectories regardless of task success;
+   separately log official reward, token/turn truncations, tool errors and infrastructure failures.
+2. **Actor memory and compute.** Start with bf16, gradient checkpointing, remove-padding and the existing fused-kernel
+   path; verify that FLA / causal-conv1d are active. Tune `PPO_MICRO_BATCH_SIZE` with the global prompt batch and
+   generations fixed, using gradient accumulation to preserve the update batch. Keep CPU offload off initially
+   (see the warning in `09_phase1_opd_ablation.sh`); benchmark it only if memory is the measured constraint. Evaluate
+   dynamic token batching or length bucketing only after checking support in the pinned hybrid-model stack and
+   preserving per-group GRPO normalization and loss weighting.
+3. **Rollout and user serving.** Tune `AGENT_LOOP_WORKERS`, `REWARD_WORKERS`, `RAY_NUM_CPUS`,
+   `ROLLOUT_GPU_MEMORY_UTILIZATION` and serving concurrency against the measured bottleneck. Track long-tail
+   conversations and user-server queues; higher concurrency only helps if complete-trajectory throughput rises.
+   Preserve seeds, sampling parameters, tool protocol and token/turn budgets. Check vLLM graph mode versus the
+   current eager path only in an isolated compatibility benchmark.
+4. **GPU allocation and communication.** Benchmark 4 actor + 3 rollout + 1 serving GPU against 3 actor + 4 rollout
+   + 1 serving GPU on the same workload, rather than assuming the actor needs four GPUs. Verify actual rank placement,
+   device isolation and weight synchronization. Keep `CHECKPOINT_BUCKET_MB` above the largest transferred tensor;
+   measure sync stalls before tuning transfer settings. Reserve separate evaluation GPUs only when the reduction in
+   training capacity is justified; otherwise evaluate between runs. Teacher serving remains separate from training.
+5. **Freeze and compare.** Select infra settings using TRAIN throughput, memory and stability, then freeze them for
+   the scientific comparisons. Keep model revisions, data order, reward, optimizer, global batch, generations, LoRA,
+   TIS, decoding and length limits fixed within each infra comparison. A bf16 change needs finite-loss/gradient and
+   reward-distribution checks; asynchronous scheduling changes also need rollout-policy lag / IS diagnostics. Changes
+   to response cap, global batch or TIS are explicit E2 training-setting changes, not throughput-only improvements.
+
+**Implementation work.** The lower launchers already expose several knobs, but the pipeline does not provide a full
+profiling report. Audit config-to-worker forwarding before tuning: plain variables sourced from the config are not
+necessarily exported, and `stage_train` currently constructs its own `EXTRA_TRAIN_ARGS`. Forward and snapshot the
+effective infra settings explicitly, add per-stage timings, and verify checkpoint save/resume plus adapter extraction
+with multiple actor ranks before a long run. The pipeline and example config currently default to fp32; update both
+to the selected, validated precision when implementing this stage.
+
+**Acceptance.** Token-budget and turn-budget truncation must each stay below 5%, with no OOM or silently dropped
+rollouts in the benchmark. Report complete valid trajectories / second, generated tokens / second, actor update time,
+end-to-end step time and GPU-hours; keep only changes with measured throughput or memory benefit and stable training
+diagnostics. Re-estimate the full-run schedule from this profile. Infrastructure GPU-hours are reported separately
+from the main curve's online teacher-token cost.
+
 ### E2 GRPO without truncation (student update without a teacher; answers Q1; an M ablation)
 
 | Item | Old setting on 32 GB | New setting |
@@ -284,11 +337,11 @@ The subsections below give the details and decision rules for each step. Trainin
 | Prompts × generations per step | 4 × 8 | **16 × 8** (or 8 × 16) |
 | Learning rate | 1e-5 → 3e-5 | one run each at 1e-5 and 3e-5 |
 | LoRA | rank 16, attention + MLP | same; plus one run with rank 64 or full fine-tuning (if memory allows) |
-| Actor precision | `fsdp_config.model_dtype=bf16` | fp32 is fine on 80 GB |
+| Actor precision | `fsdp_config.model_dtype=bf16` | bf16 starting point; validate and freeze in Section I (current pipeline default is fp32 and needs updating) |
 | Importance-sampling correction | VERL one-step off-policy defaults to `bypass_mode=True`: old_log_prob is the rollout log-prob, and the PPO ratio π_θ/π_rollout is clipped (implicit correction, no explicit IS weights) | **Explicit TIS**: `bypass_mode=False` (decoupled, recomputes old_log_prob) + `rollout_is=token`, `rollout_is_threshold=2.0`, `calculate_log_probs=True`; the pipeline's `ENABLE_TIS=1` sets all four |
 | Steps / checkpoints | 250 / every 50 | 200 / every 25 |
 
-- GPU layout (8 GPUs): 1 GPU for the student evaluation server + user simulator, 4 for training, 3 for rollout, e.g.
+- Starting GPU layout (8 GPUs; optimize in Section I): 1 GPU for the student evaluation server + user simulator, 4 for training, 3 for rollout, e.g.
   `TRAIN_GPU=0,1,2,3 ROLLOUT_GPU=4,5,6` (`03_grpo_only.sh` accepts comma-separated GPU lists; **multi-GPU is untested**, run a 2-step smoke test first).
 - Key environment variables (beyond those in `09`): `MAX_RESPONSE_LENGTH`, `TRAIN_BATCH_SIZE`, `N_GENERATIONS`, `ACTOR_LR`, `TOTAL_STEPS`, `SAVE_EVERY`,
   `LORA_TARGET_MODULES`, `GRPO_PARQUET`, `EXTRA_TRAIN_ARGS` (extra VERL overrides).
@@ -454,14 +507,15 @@ E1 R1 rollouts ─► M cycle 0: router-only curve on VAL (baseline)
 
 ## 7. Final report (Q4)
 
-- On EVAL, with a hosted strong model as the user simulator (`COMMONSTACK_API_KEY` or another OpenAI-compatible endpoint), report pass^1,
-  pass^4 and 95% CIs for the 4B base and the best checkpoint, seeds 300 + 1300.
+- On EVAL, with the same frozen local Qwen3.5-4B user simulator, model/tokenizer revision and serving/decoding settings
+  as VAL, report pass^1, pass^4 and 95% CIs for the 4B base and the best checkpoint, seeds 300 + 1300.
 - The headline is the **cost–quality curve on EVAL** for cycle 0 and the last admitted cycle: always-student,
   always-teacher, and the learned router at the operating points fixed beforehand on TRAIN (no new threshold choices
   on EVAL), with teacher-generated tokens as cost.
 - EVAL must not be used for any selection before that.
-- **API budget**: this is the only step that needs one. E0–E6 run entirely on local models. The final EVAL calls a hosted
-  model only for the user side: 67 tasks × 4 trials × 2 seeds ≈ 536 conversations per model reported, run once.
+- **Compute budget**: all stages, including final EVAL, run on local models; no hosted-model API budget is required.
+  Final EVAL is 67 tasks × 4 trials × 2 seeds = 536 conversations per reported policy, run once. Record the frozen
+  user-simulator configuration alongside the agent, router and SkillBook artifacts.
 
 ---
 
@@ -517,6 +571,7 @@ E1 R1 rollouts ─► M cycle 0: router-only curve on VAL (baseline)
 | Environments + data (before E0) | about 1 hour (`SETUP_4B_RL.md`) |
 | E0 baseline reproduction | about 2 GPU-hours |
 | E1 R1 selection | 10–20 GPU-hours (a few hours in parallel) |
+| I: infra profiling and optimization | budget half a day initially; measured throughput determines the revised training estimates |
 | E2 two GRPO runs × 200 steps | about 1 day per run (4 training + 3 rollout GPUs); frontier evaluation about 1–2 GPU-hours per checkpoint |
 | E3 | concurrent with E2 |
 | E4 (if needed) | 2–3 days; the process-reward arm is one extra GRPO run |
@@ -526,12 +581,14 @@ E1 R1 rollouts ─► M cycle 0: router-only curve on VAL (baseline)
 | E6 step 2 (groups F and G) | F: a few hours of SFT; G: one more GRPO run, ~1 day |
 | M, per cycle | teacher phase ~1–2 days (corrections + ~8 curve points × 536 VAL conversations; the teacher's thinking tokens dominate), training phase ~1 day |
 | M, four cycles + ablations | ~2–3 weeks on one 8 × A800 node |
-| Final VAL / EVAL | half a day (EVAL needs API budget) |
+| Final VAL / EVAL | half a day initially estimated; same local 4B user simulator, no hosted API |
 
 ## 11. Conventions
 
 - One configuration per `RESULTS_DIR`; never mix settings in an existing directory; resume inside the original directory.
 - Never train on VAL/EVAL, and never use EVAL results for any selection.
+- Keep the user simulator frozen at the same Qwen3.5-4B base checkpoint across training, VAL and EVAL; student
+  updates never modify it. Snapshot model/tokenizer revisions and effective serving, decoding and infra settings.
 - **No outside trajectories on official tau2 tasks.** Public tau2 leaderboard submissions and similar logs cover the
   official tasks, i.e. our VAL and EVAL. Training on them leaks the test set. Only TRAIN-task trajectories and AReaL
   synthetic tasks may be used; generate teacher data yourself (E5/E6).
