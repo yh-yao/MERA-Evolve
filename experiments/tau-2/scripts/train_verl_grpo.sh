@@ -233,7 +233,8 @@ python -m "$TRAIN_ENTRYPOINT" \
 ADAPTER_PATH="$(find "$OUTPUT_DIR" -mindepth 3 -maxdepth 3 -type d -path '*/actor/lora_adapter' -print | sort -V | tail -n 1)"
 if [[ -z "$ADAPTER_PATH" ]]; then
   latest_actor="$(find "$OUTPUT_DIR" -mindepth 2 -maxdepth 2 -type d -path '*/actor' -print | sort -V | tail -n 1)"
-  if [[ -n "$latest_actor" && -s "$latest_actor/model_world_size_1_rank_0.pt" ]]; then
+  # Any world size: the extractor merges multi-GPU FSDP shards (model_world_size_<N>_rank_<r>.pt).
+  if [[ -n "$latest_actor" ]] && compgen -G "$latest_actor/model_world_size_*_rank_0.pt" > /dev/null; then
     ADAPTER_PATH="$OUTPUT_DIR/final_adapter"
     python -m verl_code_rl.extract_sft_lora_adapter \
       --checkpoint-dir "$latest_actor" --base-model "$MODEL_PATH" \

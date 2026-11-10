@@ -8,14 +8,17 @@ checkpoint manager). This reconstructs the same LoRA-wrapped model used during
 training and re-saves just the adapter via PEFT's own `save_pretrained`, which
 serve_vllm.sh (and everything downstream) already auto-detects.
 
-Single-GPU (world_size=1, FSDP NO_SHARD) checkpoints only: `model.state_dict()`
-under NO_SHARD is the full, unsharded state dict, so no shard-gathering logic
-is needed here -- it's a plain state dict load.
+Single-GPU checkpoints (world_size=1, FSDP NO_SHARD) hold the full state dict
+in `model_world_size_1_rank_0.pt`. Multi-GPU actor checkpoints are sharded
+across `model_world_size_<N>_rank_<r>.pt`; they are merged with verl's own
+FSDP shard merger (`verl.model_merger`, the same code behind
+`python -m verl.model_merger merge`) without writing a full HF model.
 """
 
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
 
 
@@ -40,6 +43,55 @@ def _normalize_checkpoint_keys(
     return normalized, remapped
 
 
+def _checkpoint_world_size(ckpt_dir: Path) -> int:
+    shards = sorted(ckpt_dir.glob("model_world_size_*_rank_0.pt"))
+    if len(shards) != 1:
+        raise SystemExit(f"expected one model_world_size_<N>_rank_0.pt in {ckpt_dir}, found {len(shards)}")
+    return int(re.search(r"model_world_size_(\d+)_rank_0\.pt$", shards[0].name).group(1))
+
+
+def _load_full_state_dict(ckpt_dir: Path) -> dict[str, object]:
+    """Full (unsharded) actor state dict from a verl FSDP checkpoint of any world size, in its stored dtype."""
+    import torch
+    try:
+        from torch.distributed.tensor import DTensor
+    except ImportError:  # older torch
+        from torch.distributed._tensor import DTensor
+
+    world_size = _checkpoint_world_size(ckpt_dir)
+    paths = [ckpt_dir / f"model_world_size_{world_size}_rank_{r}.pt" for r in range(world_size)]
+    missing = [p.name for p in paths if not p.exists()]
+    if missing:
+        raise SystemExit(f"{ckpt_dir}: missing shards {missing}")
+    shards = [torch.load(p, map_location="cpu", weights_only=False) for p in paths]
+    if world_size == 1:
+        return shards[0]
+    print(f"[extract_sft_lora_adapter] merging {world_size} FSDP shards")
+    # Same rules as verl.model_merger's FSDP merger, without its bf16 cast (the actor stores fp32 LoRA weights)
+    # and without its non-DTensor mesh inference, which counts one shard and would merge rank 0 only.
+    merged = {}
+    for key in shards[0]:
+        parts = [sd[key] for sd in shards]
+        if isinstance(parts[0], DTensor):
+            placements = [p for p in parts[0].placements]
+            if len(placements) != 1:
+                raise SystemExit(f"{key}: {len(placements)}-D device mesh (HSDP/TP) is not supported")
+            placement, local = placements[0], [p._local_tensor for p in parts]
+            if placement.is_replicate():
+                merged[key] = local[0]
+            elif placement.is_shard():
+                merged[key] = torch.cat(local, dim=placement.dim).contiguous()
+            else:
+                raise SystemExit(f"{key}: unsupported placement {placement}")
+            if tuple(merged[key].shape) != tuple(parts[0].shape):  # a DTensor knows its global shape
+                raise SystemExit(f"{key}: merged shape {tuple(merged[key].shape)} != global {tuple(parts[0].shape)}")
+        elif isinstance(parts[0], torch.Tensor):
+            merged[key] = torch.cat(parts, dim=0).contiguous()
+        else:
+            merged[key] = parts[0]
+    return merged
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint-dir", required=True, help="e.g. .../verl_checkpoints/global_step_3")
@@ -55,13 +107,7 @@ def main() -> int:
     from transformers import AutoModelForCausalLM
 
     ckpt_dir = Path(args.checkpoint_dir)
-    shard = ckpt_dir / "model_world_size_1_rank_0.pt"
-    if not shard.exists():
-        raise SystemExit(
-            f"{shard} not found -- this extractor only supports single-GPU "
-            "(world_size=1) checkpoints. For multi-GPU runs, gather a full "
-            "state dict first."
-        )
+    _checkpoint_world_size(ckpt_dir)  # fail fast before loading the base model
 
     base = AutoModelForCausalLM.from_pretrained(
         args.base_model, torch_dtype=torch.bfloat16, trust_remote_code=True,
@@ -74,7 +120,7 @@ def main() -> int:
         bias="none",
     ))
 
-    state_dict = torch.load(shard, map_location="cpu", weights_only=False)
+    state_dict = _load_full_state_dict(ckpt_dir)
     state_dict, remapped = _normalize_checkpoint_keys(
         state_dict, set(peft_model.state_dict())
     )

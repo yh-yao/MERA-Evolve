@@ -316,12 +316,19 @@ or switch the actor to fp32. This stage is planned work; multi-GPU training and 
    reward-distribution checks; asynchronous scheduling changes also need rollout-policy lag / IS diagnostics. Changes
    to response cap, global batch or TIS are explicit E2 training-setting changes, not throughput-only improvements.
 
-**Implementation work.** The lower launchers already expose several knobs, but the pipeline does not provide a full
-profiling report. Audit config-to-worker forwarding before tuning: plain variables sourced from the config are not
-necessarily exported, and `stage_train` currently constructs its own `EXTRA_TRAIN_ARGS`. Forward and snapshot the
-effective infra settings explicitly, add per-stage timings, and verify checkpoint save/resume plus adapter extraction
-with multiple actor ranks before a long run. The pipeline and example config currently default to fp32; update both
-to the selected, validated precision when implementing this stage.
+**Implementation work.** Done (2026-11-10, CPU-tested): every variable in the pipeline config is now exported, so
+infra knobs such as `PPO_MICRO_BATCH_SIZE`, `AGENT_LOOP_WORKERS` or `ROLLOUT_GPU_MEMORY_UTILIZATION` reach
+09 / `03_grpo_only.sh` / `train_verl_grpo.sh`; `EXTRA_TRAIN_ARGS` from the config is appended to the pipeline's own
+overrides and wins on a shared key; the effective settings are written to `$RUN_DIR/train_settings.env` and per-stage
+wall times to `$RUN_DIR/stage_times.tsv`; the pipeline and example config default to bf16. Adapter extraction
+(`verl_code_rl/extract_sft_lora_adapter.py`, used by `evalckpt` and by `train_verl_grpo.sh` for the final adapter)
+previously accepted only world_size = 1 checkpoints and now merges multi-rank FSDP shards in their stored dtype;
+on synthetic 2-rank checkpoints (DTensor and plain shards) built from a real 4B actor checkpoint the result is
+bit-identical to the single-rank extraction. (`verl.model_merger` is not used: it casts to bf16, and for plain
+shards its mesh inference counts one shard and would merge rank 0 only.)
+Still open: a real multi-GPU actor run to confirm the shard format and checkpoint save/resume, and a profiling
+report. VERL logs only `num_turns/{min,mean,max}`, so the turn-budget truncation rate needs a per-rollout count
+(e.g. from the agent loop) before the acceptance rule below can be checked.
 
 **Acceptance.** Token-budget and turn-budget truncation must each stay below 5%, with no OOM or silently dropped
 rollouts in the benchmark. Report complete valid trajectories / second, generated tokens / second, actor update time,
@@ -339,7 +346,7 @@ from the main curve's online teacher-token cost.
 | Prompts × generations per step | 4 × 8 | **16 × 8** (or 8 × 16) |
 | Learning rate | 1e-5 → 3e-5 | one run each at 1e-5 and 3e-5 |
 | LoRA | rank 16, attention + MLP | same; plus one run with rank 64 or full fine-tuning (if memory allows) |
-| Actor precision | `fsdp_config.model_dtype=bf16` | bf16 starting point; validate and freeze in Section I (current pipeline default is fp32 and needs updating) |
+| Actor precision | `fsdp_config.model_dtype=bf16` | bf16 (pipeline default since 2026-11-10); validate and freeze in Section I |
 | Importance-sampling correction | VERL one-step off-policy defaults to `bypass_mode=True`: old_log_prob is the rollout log-prob, and the PPO ratio π_θ/π_rollout is clipped (implicit correction, no explicit IS weights) | **Explicit TIS**: `bypass_mode=False` (decoupled, recomputes old_log_prob) + `rollout_is=token`, `rollout_is_threshold=2.0`, `calculate_log_probs=True`; the pipeline's `ENABLE_TIS=1` sets all four |
 | Steps / checkpoints | 250 / every 50 | 200 / every 25 |
 

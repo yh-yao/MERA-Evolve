@@ -18,8 +18,12 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 CONFIG="${1:?usage: 10_4b_rl_pipeline.sh <config.env> [stage ...]}"; shift
+# Export everything the config sets: infra knobs that only lower layers read (PPO_MICRO_BATCH_SIZE,
+# AGENT_LOOP_WORKERS, ROLLOUT_GPU_MEMORY_UTILIZATION, ...) then reach 09 / 03 / train_verl_grpo.sh unchanged.
+set -a
 # shellcheck disable=SC1090
 source "$CONFIG"
+set +a
 
 # ---------------------------------------------------------------- defaults
 : "${RUN_DIR:?RUN_DIR (absolute) must be set in the config}"
@@ -36,7 +40,7 @@ TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-16}" N_GENERATIONS="${N_GENERATIONS:-8}"
 MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-8192}" MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-16384}" MAX_TURNS="${MAX_TURNS:-30}"
 LORA_RANK="${LORA_RANK:-16}" LORA_ALPHA="${LORA_ALPHA:-32}"
 LORA_TARGET_MODULES="${LORA_TARGET_MODULES:-[q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj]}"
-ACTOR_MODEL_DTYPE="${ACTOR_MODEL_DTYPE:-fp32}"     # bf16 on 32 GB cards
+ACTOR_MODEL_DTYPE="${ACTOR_MODEL_DTYPE:-bf16}"     # research_plan.md Section I: validate, then freeze
 CHECKPOINT_BUCKET_MB="${CHECKPOINT_BUCKET_MB:-2560}"  # must exceed the largest tensor (4B bf16 embedding ~1.27 GB)
 ENABLE_TIS="${ENABLE_TIS:-1}" TIS_THRESHOLD="${TIS_THRESHOLD:-2.0}"
 PASS_DELTA="${PASS_DELTA:-0.05}" VAL_SEEDS="${VAL_SEEDS:-300 1300}"
@@ -47,6 +51,10 @@ if [[ "$SMOKE" == 1 ]]; then
 else
   LIMIT=""; FRONTIER_TRIALS=8; VAL_TRIALS=4
 fi
+INFRA_VARS=(PPO_MICRO_BATCH_SIZE AGENT_LOOP_WORKERS REWARD_WORKERS RAY_NUM_CPUS ROLLOUT_GPU_MEMORY_UTILIZATION
+  ROLLOUT_ENFORCE_EAGER ROLLOUT_TEMPERATURE ROLLOUT_TOP_P USE_REMOVE_PADDING USE_FUSED_KERNELS MODEL_ATTN_IMPLEMENTATION
+  ACTOR_PARAM_OFFLOAD ACTOR_OPTIMIZER_OFFLOAD MERA_ACTOR_CUDA_ALLOC_CONF MERA_WEIGHT_TRANSFER_SHM CHECKPOINT_BACKEND
+  VLLM_GDN_PREFILL_BACKEND TOOL_FORMAT)
 FRONTIER_PARTITION="${FRONTIER_PARTITION:-$SCRIPT_DIR/data/partition_frontier_only.json}"
 export TAU2_WORKSPACE MERA_AREAL_DIR VLLM_BIN
 export TAU2_PARTITION_PATH="$SCRIPT_DIR/data/partition_v2.json"
@@ -162,15 +170,35 @@ stage_train() {
   local workers="${AGENT_LOOP_WORKERS:-16}"
   (( TRAIN_BATCH_SIZE * N_GENERATIONS % workers == 0 )) \
     || die "TRAIN_BATCH_SIZE x N_GENERATIONS ($TRAIN_BATCH_SIZE x $N_GENERATIONS) must be a multiple of AGENT_LOOP_WORKERS ($workers)"
-  local extra="actor_rollout_ref.actor.fsdp_config.model_dtype=$ACTOR_MODEL_DTYPE"
+  local ours=("actor_rollout_ref.actor.fsdp_config.model_dtype=$ACTOR_MODEL_DTYPE")
   # VERL's one-step off-policy trainer defaults to bypass_mode=True: old_log_prob := rollout log-prob and the
   # PPO ratio pi_theta / pi_rollout is clipped, so rollout_is weights are ignored. TIS needs decoupled mode.
-  [[ "$ENABLE_TIS" == 1 ]] && extra+=" algorithm.rollout_correction.bypass_mode=False algorithm.rollout_correction.rollout_is=token algorithm.rollout_correction.rollout_is_threshold=$TIS_THRESHOLD actor_rollout_ref.rollout.calculate_log_probs=True"
+  [[ "$ENABLE_TIS" == 1 ]] && ours+=(algorithm.rollout_correction.bypass_mode=False algorithm.rollout_correction.rollout_is=token
+    "algorithm.rollout_correction.rollout_is_threshold=$TIS_THRESHOLD" actor_rollout_ref.rollout.calculate_log_probs=True)
+  # EXTRA_TRAIN_ARGS from the config is appended; on a key both set, the config wins (Hydra rejects duplicates).
+  local user=() kv k extra=""
+  read -r -a user <<< "${EXTRA_TRAIN_ARGS:-}"
+  for kv in "${ours[@]}"; do
+    k="${kv%%=*}"
+    printf '%s\n' "${user[@]}" | grep -q "^+*${k}=" && { log "train: config EXTRA_TRAIN_ARGS overrides ${k}"; continue; }
+    extra+="$kv "
+  done
+  extra+="${user[*]}"
   # The parquet embeds the user-simulator URL, so build it here from the current PORT_BASE.
   "$TRAIN_VENV/bin/python" -m tau2_evolve.prepare_grpo_data --traces "$RUN_DIR/data/grpo_traces.jsonl" \
     --output "$RUN_DIR/data/grpo.parquet" --user-base-url "http://127.0.0.1:$((PORT_BASE + 91))/v1" \
     --no-user-thinking --max-steps 40 --no-balance-domains 2>&1 | tail -1 | tee -a "$LOG"
   [[ -s "$RUN_DIR/data/grpo.parquet" ]] || die "prepare_grpo_data failed"
+  {
+    echo "# effective training settings, $(date -u +%FT%TZ); '-' = not set here (lower-layer default applies)"
+    for v in ACTOR_LR TOTAL_STEPS SAVE_EVERY TRAIN_BATCH_SIZE N_GENERATIONS MAX_PROMPT_LENGTH MAX_RESPONSE_LENGTH MAX_TURNS \
+             LORA_RANK LORA_ALPHA LORA_TARGET_MODULES CHECKPOINT_BUCKET_MB ACTOR_MODEL_DTYPE ENABLE_TIS TIS_THRESHOLD \
+             TRAIN_GPUS ROLLOUT_GPUS SERVE_GPU STUDENT_MODEL USER_MODEL "${INFRA_VARS[@]}"; do
+      echo "$v=${!v:--}"
+    done
+    echo "EXTRA_TRAIN_ARGS(final)=$extra"
+  } > "$RUN_DIR/train_settings.env"
+  log "train: settings snapshot in $RUN_DIR/train_settings.env"
   log "train: lr $ACTOR_LR, $TOTAL_STEPS steps x $TRAIN_BATCH_SIZE prompts x $N_GENERATIONS, response cap $MAX_RESPONSE_LENGTH, TIS $ENABLE_TIS, train GPUs $TRAIN_GPUS, rollout GPUs $ROLLOUT_GPUS"
   env RESULTS_DIR="$RUN_DIR/train" PHASE1_GROUPS=O SKIP_EVAL=1 GRPO_PARQUET="$RUN_DIR/data/grpo.parquet" \
     ACTOR_LR="$ACTOR_LR" TOTAL_STEPS="$TOTAL_STEPS" SAVE_EVERY="$SAVE_EVERY" TRAIN_BATCH_SIZE="$TRAIN_BATCH_SIZE" \
@@ -261,8 +289,10 @@ log "pipeline start: stages ${STAGES[*]} (SMOKE=$SMOKE) config $CONFIG"
 for st in "${STAGES[@]}"; do
   declare -F "stage_$st" > /dev/null || die "unknown stage $st"
   if stage_done "$st"; then log "stage $st already done (FORCE=1 to rerun)"; continue; fi
-  log "stage $st start"
-  "stage_$st" || die "stage $st failed"
+  log "stage $st start"; t0=$SECONDS
+  "stage_$st" || die "stage $st failed after $((SECONDS - t0)) s"
+  printf '%s\t%s\t%d\n' "$(date -u +%FT%TZ)" "$st" $((SECONDS - t0)) >> "$RUN_DIR/stage_times.tsv"
+  log "stage $st took $((SECONDS - t0)) s"
   [[ "$st" == evalckpt && "$WATCH" != 1 ]] || mark_done "$st"
 done
 log "pipeline finished"
