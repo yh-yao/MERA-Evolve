@@ -16,12 +16,19 @@ significant effect. The latest 4B GRPO ran 250 steps on 32 GB GPUs; on the front
 G2, trained only on TRAIN tasks, had two checkpoints pass the bar (+5.4 / +5.6 pt), but the passing step 200 scored −2.2 pt on VAL
 (not significant): the gain did not transfer (see 1.4).
 **The main suspect is the length cap forced by GPU memory: about 30% of training conversations were truncated and scored 0.**
-The core of the next phase is to remove truncation and enlarge the batch on large-memory GPUs, then re-test GRPO.
+One component of the next phase is to remove truncation and enlarge the batch on large-memory GPUs, then re-test GRPO.
 The whole workflow is a one-command script, `experiments/tau-2/10_4b_rl_pipeline.sh` (Section 5.0).
 A second open problem is **teacher headroom**: our local 27B teacher is no better than the 4B student on VAL. The next
 phase therefore **teaches the student with a strong open-weight teacher, AReaL-SEA-235B-A22B, served locally on the
 8 × A800 node in FP8** (E6, no API budget), next to GRPO without a teacher (E2). Teacher-free fallbacks are the
 action-recall process reward (E4) and gold-action-guided self-rollouts (E5).
+
+**The main TAU-2 experiment is the full MERA loop with a cost–quality curve (Section 5, M)**, not a distillation result:
+the 4B student serves every turn behind a learned router that escalates to the strong teacher, and each cycle improves
+the student (teacher corrections + GRPO), the SkillBook and the router. Cost is the **number of tokens the teacher
+generates**. The claim to test is the paper's claim: improving the student moves the curve — the same pass rate for
+fewer teacher tokens, more so with every cycle — instead of only routing around a fixed student.
+E0–E6 are prerequisites and components of that loop.
 
 ---
 
@@ -98,7 +105,11 @@ Takeaways: 4B already matches the 27B teacher, so "teach 4B with 27B" has no mea
 
 ## 2. Questions for the next phase
 
-1. **Q1 (main question)**: with truncation removed and a larger batch, does GRPO significantly improve 4B on the frontier
+0. **Q0 (main question)**: on TAU-2, does the MERA loop move the cost–quality curve? At the same pass^1, does the routed
+   system (4B student + learned router + strong teacher) need fewer teacher-generated tokens after each cycle than with
+   the fixed base student (cycle 0 = routing around a fixed student, the prior-work setting)? Q1–Q3 and Q5 below are
+   about the components of the loop; Q4 is the final report.
+1. **Q1 (student update without a teacher)**: with truncation removed and a larger batch, does GRPO significantly improve 4B on the frontier
    (≥ +5 pt with CI lower bound > 0), and does it transfer to VAL?
 2. **Q2**: do the AReaL synthetic tasks (G1) add anything over the official TRAIN tasks alone (G2)?
 3. **Q3**: if Q1 is no, is the problem credit assignment (long conversations, terminal reward only)? Test with PPO + critic or per-turn advantage estimates.
@@ -141,6 +152,75 @@ Takeaways: 4B already matches the 27B teacher, so "teach 4B with 27B" has no mea
 ---
 
 ## 5. Experiments (in priority order)
+
+### M. Main experiment: the full MERA loop on TAU-2 with a cost–quality curve (answers Q0)
+
+**System.** The 4B student (Qwen3.5-4B + LoRA adapter + SkillBook in the prompt) answers every turn. A learned router
+(`tau2_evolve/router.py`, logistic regression on conversation-state features) decides when to escalate to the teacher,
+AReaL-SEA-235B-A22B served locally (E6). After an escalation the teacher finishes the conversation (`RoutedAgent`).
+At replay the official tau2 evaluator is the verifier.
+
+**Cost = teacher-generated tokens.** For each conversation, the sum of `completion_tokens` over all teacher calls,
+**including reasoning tokens** (the teacher runs in thinking mode and vLLM counts them as completion tokens).
+Reported as the mean per conversation and normalized as
+`cost% = teacher tokens of the policy / teacher tokens of always-teacher` on the same tasks, trials and seeds.
+Student tokens and user-simulator tokens are logged but not counted (the student is the fixed local base cost; the user
+simulator is part of the environment).
+
+**One cycle** (c = 0 … K, K = 3 → four cycles as in the code-generation study):
+1. *Collect*: current student (adapter_c, SkillBook_c) on TRAIN + valid AReaL tasks, no teacher.
+2. *Teacher corrections*: verified error-point corrections on the failed rollouts (E6 step 1); only fixes that the
+   official evaluator passes are kept.
+3. *SkillBook update* (`tau2_evolve/build_skillbook.py`) from successful traces; it is prepended to the student prompt.
+4. *Student update*: SFT on corrections (+ rehearsal of the student's own successes), then GRPO with the E2 settings
+   → adapter_{c+1} (E6 step 2, group G).
+5. *Router update*: student-only rollouts of the new student on TRAIN give escalate/continue labels
+   (`tau2_evolve/train_router.py`); the router is fit last so its labels reflect the current student.
+6. *Admission* (joint replay on a TRAIN shard, never on VAL/EVAL): the new adapter + SkillBook + router are admitted
+   only if routed pass^1 is not lower than the previous cycle's at no more teacher tokens. Otherwise the previous state
+   carries over.
+7. *Measure* the curve on VAL (below).
+
+**The curve** (every cycle; VAL, seeds 300 + 1300, 67 tasks × 4 trials each):
+- Endpoints: always-student (0 teacher tokens) and always-teacher (cost% = 100).
+- Learned router: thresholds {0.3, 0.4, 0.5, 0.6, 0.7, 0.8} trace the curve. The headline operating point is chosen
+  on a TRAIN calibration shard, not on VAL.
+- Baselines at matched cost: per-turn `random:P` (cost-blind, P ∈ {0.1, 0.3, 0.5}) and `tool_error` from
+  `tau2_evolve/turn_router.py`.
+- Headline numbers, with bootstrap CIs over tasks:
+  (a) **cost at matched quality** — the teacher-token % needed to reach 95% of always-teacher pass^1 (interpolated);
+  (b) **pass^1 at a fixed budget** — e.g. 30% of always-teacher tokens.
+- Cycle 0 (base student, routing only) is the "route around a fixed student" baseline. The main result compares the
+  curves of cycles 1 … K with cycle 0.
+
+**Ablations** (each a loop run; two cycles are enough if compute is short):
+- routing only (no student update) — equals cycle 0 repeated with a re-fit router;
+- no SkillBook;
+- student update by GRPO only (E2, no teacher data) vs teacher corrections + GRPO (E6);
+- one cycle vs K cycles;
+- learned router vs `random:P` at equal cost.
+
+**Pass rules.**
+- Primary: at cycle K, cost at matched quality is lower than at cycle 0 and the bootstrap CI of the difference
+  excludes 0; at the headline operating point, routed pass^1 is within the CI of always-teacher.
+- Secondary: always-student pass^1 rises across cycles (the E2/E6 rules) — it explains *why* the curve moves.
+- If cycle 1 does not move the curve, stop the loop and fall back to the component experiments (E4/E5) before spending
+  more cycles.
+
+**Prerequisites.** E0 (baseline), E6 step 0 (the teacher must be far stronger than the student — with the 27B teacher
+always-teacher ≈ always-student, so there was no curve to move; this is why our earlier per-turn router results were
+inconclusive), E1 (R1 rollouts, reused as cycle-0 collection).
+
+**New code needed (not written yet).**
+1. Token accounting: record `completion_tokens` (with reasoning) and the source (student / teacher) of every assistant
+   message in `RoutedAgent` and `TurnRoutedAgent`, and add `teacher_completion_tokens` / `student_completion_tokens`
+   to each trace row. Check first whether tau2's message objects already carry `usage` from LiteLLM.
+2. `scripts/cost_quality_curve.py`: routed eval files → curve points with bootstrap CIs, cost at matched quality,
+   pass at fixed budget, plot.
+3. Loop driver: `scripts/run_cycle_pipeline.sh` (the `4cycle` recipe) still uses the old 97/35 split, the 2B student,
+   and runs its routed eval on the 35 EVAL tasks. Port it to partition_v2, the 4B student and the local teacher; run the
+   curve on VAL; add the TRAIN-shard admission step and the single-node switch between the teacher phase and the
+   training phase.
 
 ### 5.0 One-command workflow: `10_4b_rl_pipeline.sh`
 
@@ -194,7 +274,7 @@ The subsections below give the details and decision rules for each step. Trainin
 - Pick tasks with 0 < p < 1 with `scripts/select_frontier.py`, then build the GRPO parquet with `tau2_evolve.prepare_grpo_data --max-steps 40 --no-balance-domains`.
 - Expected: about 546 AReaL tasks and about 36 TRAIN tasks (our result; ±10% with different seeds).
 
-### E2 GRPO without truncation (main experiment, answers Q1)
+### E2 GRPO without truncation (student update without a teacher; answers Q1; an M ablation)
 
 | Item | Old setting on 32 GB | New setting |
 |---|---|---|
@@ -270,7 +350,7 @@ conversational behaviour the student gets wrong. That is what a strong teacher a
 - **Pass**: VAL improves over the E2 best (or over base if E2 failed), and p rises on the targeted p = 0 tasks in a
   held-out subset of them.
 
-### E6 Strong teacher served locally: AReaL-SEA-235B-A22B (main teacher line; answers Q5; no API)
+### E6 Strong teacher served locally: AReaL-SEA-235B-A22B (the teacher of the M loop; answers Q5; no API)
 
 The next phase **uses a strong teacher to teach the 4B student**. The teacher is an open-weight model served on the
 same 8 × A800 node, so no API budget is needed.
@@ -342,16 +422,20 @@ Same rule as E2: frontier gate (≥ +5 pt, CI lower bound > 0), then VAL seeds 3
 | E6 step 1 | all 8: start the teacher first with `--gpu-memory-utilization 0.72` (TP = 8), then the 4B student and the 4B user simulator on GPUs 0 and 1 with ~0.2 each (verify they start; otherwise put them on a second machine) | corrections and demonstrations |
 | E2 (group O) and E6 step 2 (groups F, G) | all 8 per run (training 4 + rollout 3 + serving 1), one run at a time | student training |
 | Evaluation of checkpoints | 1–2 GPUs per checkpoint between runs | frontier / VAL |
+| M, each cycle — teacher phase | teacher (TP = 8, 0.72) + 4B student and user simulator on GPUs 0–1 | corrections, router labels, VAL curve (all policies) |
+| M, each cycle — training phase | teacher stopped; all 8 for SFT + GRPO | student update |
 
 ### Decision flow
 
 ```text
-E0 baseline ─► E6 step 0 (teacher qualification) ─► E1 R1 selection
-                    │
-     teacher strong ├─► E6 step 1 teacher data ─► step 2: F, G  ┐
-                    │                                            ├─► compare on VAL ─► final report (Section 7)
-                    └─► E2 GRPO only (group O) + E3 ─────────────┘
-     teacher not strong enough ─► E4 process reward ─► E5 gold-guided self-rollouts
+E0 baseline ─► E6 step 0: teacher far stronger than the 4B student?
+                 │ no  ─► no curve to move: run the component experiments only (E2 GRPO, E4, E5)
+                 │ yes
+                 ▼
+E1 R1 rollouts ─► M cycle 0: router-only curve on VAL (baseline)
+                 ─► M cycle 1: corrections + SkillBook + student update + router ─► curve
+                      │ curve moved (cost at matched quality ↓) ─► cycles 2 … K + ablations ─► final report (Section 7)
+                      │ curve did not move ─► stop; diagnose with E2 (GRPO only), E4 (process reward), E5 (gold-guided)
 ```
 
 ## 6. Evaluation workflow
@@ -372,6 +456,9 @@ E0 baseline ─► E6 step 0 (teacher qualification) ─► E1 R1 selection
 
 - On EVAL, with a hosted strong model as the user simulator (`COMMONSTACK_API_KEY` or another OpenAI-compatible endpoint), report pass^1,
   pass^4 and 95% CIs for the 4B base and the best checkpoint, seeds 300 + 1300.
+- The headline is the **cost–quality curve on EVAL** for cycle 0 and the last admitted cycle: always-student,
+  always-teacher, and the learned router at the operating points fixed beforehand on TRAIN (no new threshold choices
+  on EVAL), with teacher-generated tokens as cost.
 - EVAL must not be used for any selection before that.
 - **API budget**: this is the only step that needs one. E0–E6 run entirely on local models. The final EVAL calls a hosted
   model only for the user side: 67 tasks × 4 trials × 2 seeds ≈ 536 conversations per model reported, run once.
@@ -414,6 +501,9 @@ E0 baseline ─► E6 step 0 (teacher qualification) ─► E1 R1 selection
 | `experiments/tau-2/tau2_evolve/collect_error_points.py`, `turn_router.py` | Error points, per-turn routing (reusable for E4) |
 | `experiments/tau-2/scripts/check_areal_tasks.py` | AReaL task replay check |
 | `experiments/tau-2/scripts/merge_lora_qwen35.py` | Merging LoRAs that include GDN projections |
+| `experiments/tau-2/tau2_evolve/router.py`, `train_router.py` | Learned escalation router (state features, threshold) and its training (M) |
+| `experiments/tau-2/tau2_evolve/build_skillbook.py`, `skills.py` | SkillBook construction (M) |
+| `experiments/tau-2/scripts/run_cycle_pipeline.sh` | Multi-cycle loop driver; needs porting to partition_v2 / 4B / local teacher (M) |
 | `experiments/tau-2/tau2_evolve/agent_loop.py` | GRPO reward, including the action-recall process reward (`TAU2_ACTION_RECALL_*`, E4) |
 | `experiments/tau-2/tau2_evolve/error_points_to_sft.py` | Teacher corrections → SFT parquet (E6) |
 | `experiments/tau-2/PLAN_4B_A800.md`, `PLAN_4B_RL.md` | Plans of the previous phase and their step-by-step adjustment log |
@@ -434,6 +524,8 @@ E0 baseline ─► E6 step 0 (teacher qualification) ─► E1 R1 selection
 | E6 step 0 (teacher qualification) | download ~470 GB (ModelScope in China); frontier + VAL with the teacher, ~half a day |
 | E6 step 1 (teacher data) | teacher on the whole node, ~1 day (A800 runs FP8 weight-only, i.e. bf16 speed) |
 | E6 step 2 (groups F and G) | F: a few hours of SFT; G: one more GRPO run, ~1 day |
+| M, per cycle | teacher phase ~1–2 days (corrections + ~8 curve points × 536 VAL conversations; the teacher's thinking tokens dominate), training phase ~1 day |
+| M, four cycles + ablations | ~2–3 weeks on one 8 × A800 node |
 | Final VAL / EVAL | half a day (EVAL needs API budget) |
 
 ## 11. Conventions
