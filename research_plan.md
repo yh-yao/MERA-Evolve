@@ -1,10 +1,12 @@
-# TAU-2 Research Plan: RL for a 4B Student (handoff to a larger-compute team)
+# MERA Research Plan: TAU-2 and BFCL-V4 with a 4B Student
 
 This document is for the people taking over these experiments with more compute. After reading it you should be able to
 reproduce the existing results on your own and run the key experiments of the next phase.
-General repository instructions (environments, launchers, invariants) are in `CLAUDE.md`; this document covers only the tau2 line.
+General repository instructions (environments, launchers, invariants) are in `CLAUDE.md`.
+Sections 0–11 cover the TAU-2 handoff; Section 12 adds BFCL-V4 as the second tool-use benchmark.
+The BFCL adapter and experiments are planned work, not existing code or measured results.
 
-Branch: `tau2-4b-rl-handoff` (based on `tau2-phase0-1-opd-27b`; contains all code and experiment scripts).
+Branch: `tau2-4b-rl-handoff` (based on `tau2-phase0-1-opd-27b`; contains the existing TAU-2 code and experiment scripts).
 
 ---
 
@@ -513,7 +515,7 @@ E1 R1 rollouts ─► M cycle 0: router-only curve on VAL (baseline)
   always-teacher, and the learned router at the operating points fixed beforehand on TRAIN (no new threshold choices
   on EVAL), with teacher-generated tokens as cost.
 - EVAL must not be used for any selection before that.
-- **Compute budget**: all stages, including final EVAL, run on local models; no hosted-model API budget is required.
+- **Compute budget**: all TAU-2 stages, including final EVAL, run on local models; no hosted-model API budget is required.
   Final EVAL is 67 tasks × 4 trials × 2 seeds = 536 conversations per reported policy, run once. Record the frozen
   user-simulator configuration alongside the agent, router and SkillBook artifacts.
 
@@ -587,10 +589,112 @@ E1 R1 rollouts ─► M cycle 0: router-only curve on VAL (baseline)
 
 - One configuration per `RESULTS_DIR`; never mix settings in an existing directory; resume inside the original directory.
 - Never train on VAL/EVAL, and never use EVAL results for any selection.
-- Keep the user simulator frozen at the same Qwen3.5-4B base checkpoint across training, VAL and EVAL; student
+- For TAU-2, keep the user simulator frozen at the same Qwen3.5-4B base checkpoint across training, VAL and EVAL; student
   updates never modify it. Snapshot model/tokenizer revisions and effective serving, decoding and infra settings.
 - **No outside trajectories on official tau2 tasks.** Public tau2 leaderboard submissions and similar logs cover the
   official tasks, i.e. our VAL and EVAL. Training on them leaks the test set. Only TRAIN-task trajectories and AReaL
   synthetic tasks may be used; generate teacher data yourself (E5/E6).
 - Draw conclusions only after reloading (or merging) the adapter; every evaluation must pass the adapter-active assertion.
 - `.env`, API keys, model weights and `results/` stay out of the repository.
+
+---
+
+## 12. Second benchmark: BFCL-V4 (planned)
+
+### 12.1 Question, models and scope
+
+**Question.** Does the MERA loop move the teacher-token cost–quality curve on tool-use tasks beyond TAU-2?
+Use the same **Qwen3.5-4B student base checkpoint**, LoRA setup and candidate **AReaL-SEA-235B-A22B teacher**.
+Start the BFCL-specific loop from a fresh adapter on that base; the TAU-2-trained adapter is an optional transfer
+ablation, selected on TAU-2 VAL before BFCL testing. Keep each model's thinking mode fixed across cycles. Re-qualify
+the teacher on BFCL development tasks: TAU-2 headroom does not establish BFCL headroom.
+
+BFCL-V4 adds agentic web search and memory to the earlier function-calling and multi-turn evaluations. Prioritize
+multi-turn tool use and memory for loop development, then report the full scoring suite for the final comparison.
+The official V4 composition weights Agentic 40%, Multi-Turn 30%, Live 10%, Non-Live 10% and Hallucination 10%; use the
+pinned official scorer rather than a pooled task average. Format sensitivity is a separate diagnostic, not part of
+the headline score. [Official V4 methodology](https://gorilla.cs.berkeley.edu/blogs/15_bfcl_v4_web_search.html)
+
+| Phase | Categories | Purpose |
+|---|---|---|
+| First integration | `multi_turn_base`, `multi_turn_miss_func`, `multi_turn_miss_param`, `multi_turn_long_context` | Stateful calls, missing information and long context |
+| Agentic extension | `memory_kv`, `memory_vector`, `memory_rec_sum` | Memory writing and retrieval across sessions |
+| Final coverage | `all_scoring`, including web search, single-turn/live and irrelevance | Full V4 score and category breakdown |
+| Optional diagnostic | `format_sensitivity` in its supported prompting mode | Report separately from native-FC results |
+
+These are the official category names; confirm availability in the pinned version before writing launchers.
+[Official category reference](https://github.com/ShishirPatil/gorilla/blob/main/berkeley-function-call-leaderboard/TEST_CATEGORIES.md)
+
+**Environment.** Preserve BFCL's supplied user turns, tool backends and termination rules; do not add TAU-2's 4B user
+simulator. Preserve the memory prefill → snapshot → isolated-question protocol. A routed policy must carry the
+current conversation and tool state into the teacher; for memory, route prefill and retrieval calls with explicit
+model ownership and retain all associated teacher-token costs.
+[Official inference loop](https://github.com/ShishirPatil/gorilla/blob/main/berkeley-function-call-leaderboard/bfcl_eval/model_handler/base_handler.py),
+[memory protocol](https://gorilla.cs.berkeley.edu/blogs/16_bfcl_v4_memory.html)
+
+### 12.2 Freeze the evaluation and build separate training data
+
+- Pin the BFCL code commit, data checksums, scorer, model/tokenizer revisions, FC handler, chat template, decoding,
+  context limits and tool-step limits before running comparisons. Verify native Qwen3.5 tool-call round trips rather
+  than substituting a Qwen3 model name and assuming compatibility.
+- Keep the official BFCL evaluation entries and their reference answers out of training, teacher-correction
+  collection, SkillBook construction, router fitting and calibration. Do not use public model response logs as
+  demonstrations. Inspecting full official scores must not become a checkpoint or threshold selection loop.
+- Create a separate executable TRAIN/DEV corpus with new scenarios and initial states. Audit provenance and overlap
+  against official cases; renaming entities or paraphrasing a benchmark question is insufficient. Keep related task
+  variants together, and split memory data by source conversation/session group across all backends. Freeze the
+  manifest before training. This data work is a prerequisite for a BFCL-trained MERA claim.
+- Use DEV for headroom checks, adapter selection, loop admission and threshold calibration. Reserve the full official
+  suite for the final, predeclared policies. An early smoke test uses independent development cases; any official
+  cases used for debugging must be disclosed and excluded from an untouched-test claim.
+- Web search needs a separately configured search service in the current official harness (SerpAPI). Record provider,
+  run time and tool responses, and interleave paired policy runs to reduce temporal drift. Cached replay is a
+  separate controlled diagnostic. Local model serving removes hosted-model charges, not search-service costs.
+  [Official setup and evaluation guide](https://github.com/ShishirPatil/gorilla/blob/main/berkeley-function-call-leaderboard/README.md)
+
+### 12.3 Experiments and decision gates
+
+| Experiment | Run | Gate / deliverable |
+|---|---|---|
+| B0: harness and baseline | Independent DEV smoke cases; 4B base, candidate teacher; optional frozen TAU-2 adapter | Native tool parsing, state isolation, token usage and scorer verified; DEV baseline by category |
+| B1: teacher qualification | Paired student/teacher DEV runs, including multi-turn and memory | Positive paired quality gap with CI excluding 0 and verified recoveries of student failures; otherwise stop the teacher loop |
+| B2: cycle 0 | Fixed base student + learned router, always-student/teacher endpoints, random and tool-error routing | DEV cost–quality curve; operating points calibrated without official-test feedback |
+| B3: one MERA update | TRAIN rollouts → verified teacher suffixes + rehearsal → SkillBook → SFT + GRPO → refit router | Admit jointly on DEV; continue to cycles 2–3 only if the curve improves |
+| B4: final report | Frozen cycle 0 and last admitted cycle, endpoints and predeclared ablations on official `all_scoring` | Full V4 score, category scores, teacher-token curves, paired CIs and infra GPU-hours |
+
+During B3, rebuild tool and memory state from the saved prefix before counterfactual teacher continuation. Verify
+each corrected rollout with BFCL-compatible checks for that training category; the TAU-2 reward cannot be reused.
+Record invalid tool calls, repeated calls, context truncation and step-limit failures separately. Reuse Section I's
+profiling workflow, then tune the actor/rollout/serving allocation for BFCL without reserving a user-simulator GPU.
+
+**Cost and statistics.** Retain teacher-generated tokens, including reasoning, as the primary online cost and log
+student tokens, latency and total GPU-hours separately. For memory, include prefill plus retrieval costs in the total
+workload and report the phases separately; do not treat teacher-created memory as free. Freeze the evaluation
+workload and prefill reuse policy across policies. Apply official category weights to quality; for a pooled token
+curve state the task mix explicitly and also report category curves. Bootstrap paired task groups, keeping memory
+questions sharing a source session together, and recompute weighted scores and interpolated curve statistics in
+each replicate. Choose budgets and a numerical quality non-inferiority margin on DEV before final evaluation.
+
+**Success.** Relative to cycle 0, the final admitted policy needs fewer teacher tokens at the predeclared matched
+quality, with the paired CI of the cost difference excluding 0; its quality difference must pass the predeclared
+non-inferiority test. Report student-only improvement and no-SkillBook / GRPO-only / routing-only ablations to
+explain the curve movement. Multi-turn-only or memory-only runs are labeled **BFCL-V4 subsets**; without every
+scoring category, do not report the result as full BFCL-V4 Overall Accuracy.
+
+### 12.4 Implementation and execution order
+
+All paths and recipes below are proposed, not runnable yet:
+
+- `experiments/bfcl-v4/`: pinned setup, independent data manifests, model/FC handlers, trace collection and official
+  evaluation wrappers. Keep BFCL trace, state and reward logic separate from `tau2_evolve`.
+- Register `bfcl-v4` recipes in `scripts/run_experiment.sh` for smoke, baseline, cycle and final evaluation; reuse
+  serving, LoRA extraction/reload checks and the experiment lifecycle. Add CPU checks for state isolation,
+  tool-call conversion, split boundaries, memory snapshots and token accounting before GPU runs.
+- Add correction/SFT conversion, a BFCL GRPO agent loop, router features/labels and category-aware curve analysis.
+  Verify adapter activation and multi-rank checkpoint resume before committing to full training.
+
+**Order.** Prepare the pinned harness and independent DEV cases after the TAU-2 baseline/infra smoke work. Run B0/B1
+before committing to BFCL data generation and training; a teacher that fails B1 leaves a baseline/transfer result,
+not an unqualified teacher loop. Run BFCL training sequentially with TAU-2 on the single 8 × A800 node. Budget the
+harness/handler integration and independent TRAIN/DEV generation separately, then estimate GPU time from measured
+per-category throughput; the TAU-2 schedule in Section 10 does not include this second benchmark.
