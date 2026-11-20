@@ -1,0 +1,6 @@
+=== raw counts ===
+base_VAL_seed300.jsonl: n=268 passed=74 (0.276) errors=0 airline=6/24 retail=54/164 telecom=14/80
+base_VAL_seed1300.jsonl: n=268 passed=72 (0.269) errors=0 airline=4/24 retail=57/164 telecom=11/80
+teacher_VAL_seed300.jsonl: n=268 passed=80 (0.299) errors=6 airline=2/24 retail=62/164 telecom=16/80
+teacher_VAL_seed1300.jsonl: n=268 passed=79 (0.295) errors=52 airline=4/24 retail=62/164 telecom=13/80
+base_frontier.jsonl: n=464 passed=286 (0.616) errors=0 airline=129/176 retail=154/240 telecom=3/48

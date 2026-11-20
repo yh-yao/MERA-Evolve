@@ -1,0 +1,47 @@
+{
+  "n_tasks": 67,
+  "baseline_pass^1": 0.27611940298507465,
+  "candidate_pass^1": 0.26865671641791045,
+  "delta_pass^1": -0.007462686567164179,
+  "ci95": [
+    -0.06343283582089553,
+    0.05223880597014925
+  ],
+  "wins": 17,
+  "losses": 22,
+  "ties": 28,
+  "mcnemar_per_trial": [
+    {
+      "trial": 0,
+      "wins": 10,
+      "losses": 11,
+      "p": 1.0
+    },
+    {
+      "trial": 1,
+      "wins": 6,
+      "losses": 10,
+      "p": 0.454498291015625
+    },
+    {
+      "trial": 2,
+      "wins": 14,
+      "losses": 9,
+      "p": 0.4048728942871094
+    },
+    {
+      "trial": 3,
+      "wins": 8,
+      "losses": 10,
+      "p": 0.8145294189453125
+    }
+  ],
+  "mcnemar_all_k": {
+    "wins": 1,
+    "losses": 2,
+    "p": 1.0
+  },
+  "sd_task_delta": 0.23646238086201282,
+  "mdd_if_noise": 0.08093353204510328,
+  "runs_consistent": true
+}

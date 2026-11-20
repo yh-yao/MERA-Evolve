@@ -1,0 +1,5 @@
+/data/htlcrosssale-gps-share/powerop_transfer/mera_evolve_repro/results/e0_base_val/base_VAL_seed300.jsonl  trials=4
+  overall  n= 67  pass^1=27.6%  pass^4=4.5%
+  airline  n=  6  pass^1=25.0%  pass^4=0.0%
+  retail   n= 41  pass^1=32.9%  pass^4=7.3%
+  telecom  n= 20  pass^1=17.5%  pass^4=0.0%

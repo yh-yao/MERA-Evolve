@@ -107,3 +107,10 @@ def install_attention_patch():
 
 if not _DEFER_HEAVY_PATCHES:
     install_attention_patch()
+
+if not _DEFER_HEAVY_PATCHES:
+    try:
+        from tau2_evolve.qwen35_lora_patch import install as _install_lora_weight_patch
+        _install_lora_weight_patch()
+    except Exception:
+        pass

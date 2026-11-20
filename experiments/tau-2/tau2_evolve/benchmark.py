@@ -141,7 +141,7 @@ def task_ids_for(bucket: str, domain: str | None = None) -> list[tuple[str, str]
         from tau2_evolve import areal_tasks
 
         return areal_tasks.task_ids(domain)
-    if partition_version() >= 2:
+    if partition_version() >= 2 or bucket == "UTILITY_DEV":
         rows = load_partition()[bucket]
         return [(r["domain"], r["task_id"]) for r in rows if domain is None or r["domain"] == domain]
     if bucket in ("TRAIN", "EVAL") and (domain is None or domain == "telecom"):

@@ -1,0 +1,7 @@
+=== frontier diagnostics ===
+--- base_frontier.jsonl ---
+/data/htlcrosssale-gps-share/powerop_transfer/mera_evolve_repro/results/e0_base_val/base_frontier.jsonl  trials=8
+  overall  n= 58  pass^1=61.6%  pass^8=24.1%
+  airline  n= 22  pass^1=73.3%  pass^8=40.9%
+  retail   n= 30  pass^1=64.2%  pass^8=16.7%
+  telecom  n=  6  pass^1=6.2%  pass^8=0.0%

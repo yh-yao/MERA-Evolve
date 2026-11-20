@@ -1,0 +1,1 @@
+=== paired comparison: 9B teacher (candidate) vs 4B student (baseline) ===

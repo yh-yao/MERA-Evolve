@@ -33,7 +33,7 @@ from tau2_evolve import benchmark
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--bucket", default="TRAIN", choices=["TRAIN", "EVAL", "DIAG", "VAL", "AREAL"])
+    ap.add_argument("--bucket", default="TRAIN", choices=["TRAIN", "EVAL", "DIAG", "VAL", "AREAL", "UTILITY_DEV"])
     ap.add_argument("--domain", default=None, choices=benchmark.DOMAINS)
     ap.add_argument("--limit", type=int, default=-1)
     ap.add_argument("--shard", default=None, help="i/n: keep every n-th task starting at i (after --limit)")

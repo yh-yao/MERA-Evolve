@@ -1,0 +1,27 @@
+=== per-run summary (pass^k, bootstrap CI) ===
+--- base_VAL_seed300.jsonl ---
+/data/htlcrosssale-gps-share/powerop_transfer/mera_evolve_repro/results/e0_base_val/base_VAL_seed300.jsonl  trials=4
+  overall  n= 67  pass^1=27.6%  pass^4=4.5%
+  airline  n=  6  pass^1=25.0%  pass^4=0.0%
+  retail   n= 41  pass^1=32.9%  pass^4=7.3%
+  telecom  n= 20  pass^1=17.5%  pass^4=0.0%
+--- base_VAL_seed1300.jsonl ---
+/data/htlcrosssale-gps-share/powerop_transfer/mera_evolve_repro/results/e0_base_val/base_VAL_seed1300.jsonl  trials=4
+  overall  n= 67  pass^1=26.9%  pass^4=3.0%
+  airline  n=  6  pass^1=16.7%  pass^4=0.0%
+  retail   n= 41  pass^1=34.8%  pass^4=4.9%
+  telecom  n= 20  pass^1=13.8%  pass^4=0.0%
+--- teacher_VAL_seed300.jsonl ---
+--- teacher_VAL_seed1300.jsonl ---
+=== repeatability between the two seeds of one policy ===
+repeatability /data/htlcrosssale-gps-share/powerop_transfer/mera_evolve_repro/results/e0_base_val/base_VAL_seed300.jsonl vs /data/htlcrosssale-gps-share/powerop_transfer/mera_evolve_repro/results/e0_base_val/base_VAL_seed1300.jsonl
+  n_tasks=67  pass^1 27.6% -> 26.9%  delta=-0.7pt  95% CI [-6.3, +5.2]
+  per-task wins/losses/ties = 17/22/28
+  trial 0: McNemar wins=10 losses=11 p=1
+  trial 1: McNemar wins=6 losses=10 p=0.4545
+  trial 2: McNemar wins=14 losses=9 p=0.4049
+  trial 3: McNemar wins=8 losses=10 p=0.8145
+  all-k-pass: McNemar wins=1 losses=2 p=1
+  runs_consistent (CI covers 0) = True
+  minimum detectable pass^1 difference (alpha=0.05, power=0.8) = 8.1pt
+  EXPAND_EVAL=False
